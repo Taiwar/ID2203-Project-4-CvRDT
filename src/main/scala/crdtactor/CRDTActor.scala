@@ -39,10 +39,13 @@ object CRDTActor {
 
 import CRDTActor.*
 
+// The actor implementation of the CRDT actor that uses a LWWMap CRDT to store the state
 class CRDTActor(
+  // id is the unique identifier of the actor, ctx is the actor context
                  id: Int,
                  ctx: ActorContext[Command]
                ) extends AbstractBehavior[Command](ctx) {
+
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
 
@@ -56,7 +59,14 @@ class CRDTActor(
 
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
+    // Broadcast the delta to all other actors and reset the delta
+    // CRDT-Delta: https://pekko.apache.org/docs/pekko/current//typed/distributed-data.html#delta-crdt
     val deltaOption = crdtstate.delta
+
+    // The deltaOption is an instance of Option,
+    // a Scala container type that can either hold a value (Some)
+    // or no value (None). This is used to represent the presence
+    // or absence of a value, providing a safer alternative to null references.
     deltaOption match
       case None => ()
       case Some(delta) =>
@@ -64,6 +74,7 @@ class CRDTActor(
         others.foreach { //
           (name, actorRef) =>
             actorRef !
+              // Send the delta to the other actors
               DeltaMsg(ctx.self, delta)
         }
 

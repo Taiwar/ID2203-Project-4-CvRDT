@@ -17,7 +17,10 @@ object Bootstrap {
 
     // Create the actors
     val actors = (0 until N_ACTORS).map { i =>
+      // Create the actor and give it a name
       val name = s"CRDTActor-$i"
+
+      // Spawn the actor and get its reference (address)
       val actorRef = system.spawn(
         Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(i, ctx) },
         name
