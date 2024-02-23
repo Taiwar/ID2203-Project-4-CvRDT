@@ -5,10 +5,7 @@ import org.apache.pekko.actor.typed.scaladsl.AbstractBehavior
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.typed.Behavior
 import org.apache.pekko.cluster.ddata
-import org.apache.pekko.cluster.ddata.DeltaReplicatedData
-import org.apache.pekko.cluster.ddata.ReplicatedData
 import org.apache.pekko.cluster.ddata.ReplicatedDelta
-import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
 
 object CRDTActor {
@@ -17,21 +14,26 @@ object CRDTActor {
 
   // Messages containing the CRDT delta state exchanged between actors
   case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
-      extends Command
+    extends Command
 
   // Triggers the actor to start the computation (do this only once!)
   case object Start extends Command
 
   // Triggers the actor to consume an operation (do this repeatedly!)
   case object ConsumeOperation extends Command
+
+  // For testing: Messages to read the current state of the CRDT
+  case class ReadState(from: ActorRef[Command]) extends Command
+
+  case class StateMsg(state: ddata.LWWMap[String, Int]) extends Command
 }
 
 import CRDTActor.*
 
 class CRDTActor(
-    id: Int,
-    ctx: ActorContext[Command]
-) extends AbstractBehavior[Command](ctx) {
+                 id: Int,
+                 ctx: ActorContext[Command]
+               ) extends AbstractBehavior[Command](ctx) {
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
 
@@ -80,5 +82,11 @@ class CRDTActor(
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
       Behaviors.same
+
+    case ReadState(from) =>
+      ctx.log.info(s"CRDTActor-$id: Sending state to ${from.path.name}")
+      from ! StateMsg(crdtstate)
+      Behaviors.same
+
   Behaviors.same
 }
