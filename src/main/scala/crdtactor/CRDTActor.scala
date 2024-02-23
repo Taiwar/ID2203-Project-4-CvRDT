@@ -26,6 +26,15 @@ object CRDTActor {
   case class ReadState(from: ActorRef[Command]) extends Command
 
   case class StateMsg(state: ddata.LWWMap[String, Int]) extends Command
+
+  // Key-Value Ops
+  case class Put(key: String, value: Int, from: ActorRef[Command]) extends Command
+
+  case class PutMsg(key: String) extends Command
+
+  case class Get(key: String, from: ActorRef[Command]) extends Command
+
+  case class GetMsg(key: String, value: Int) extends Command
 }
 
 import CRDTActor.*
@@ -64,7 +73,7 @@ class CRDTActor(
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case Start =>
       ctx.log.info(s"CRDTActor-$id started")
-      ctx.self ! ConsumeOperation // start consuming operations
+      // ctx.self ! ConsumeOperation // start consuming operations
       Behaviors.same
 
     case ConsumeOperation =>
@@ -75,6 +84,19 @@ class CRDTActor(
       ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
       broadcastAndResetDeltas()
       ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+      Behaviors.same
+
+    case Put(key, value, from) =>
+      ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+      crdtstate = crdtstate.put(selfNode, key, value)
+      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+      broadcastAndResetDeltas()
+      from ! PutMsg(key)
+      Behaviors.same
+
+    case Get(key, from) =>
+      ctx.log.info(s"CRDTActor-$id: Sending value of $key to ${from.path.name}")
+      from ! GetMsg(key, crdtstate.get(key).getOrElse(0))
       Behaviors.same
 
     case DeltaMsg(from, delta) =>

@@ -28,5 +28,32 @@ class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
     }
 
+    "get a put item" in {
+      val probe = createTestProbe[Command]()
+      val crdtActor = spawn(Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(1, ctx) })
+
+      val key = "a"
+      val value = 1
+      crdtActor ! Put(key, value, probe.ref)
+      var response = probe.receiveMessage()
+
+      response match {
+        case putMsg: PutMsg =>
+          putMsg should not be null
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
+
+      crdtActor ! Get(key, probe.ref)
+      response = probe.receiveMessage()
+
+      response match {
+        case getMsg: GetMsg =>
+          getMsg.value should be (value)
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
+    }
+
   }
 }
