@@ -37,7 +37,7 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
   "The system" must {
 
-    "have eventually consistent state (basic)" in new StoreSystem {
+    "have eventually consistent state after CRDT actions (basic)" in new StoreSystem {
       val probe = createTestProbe[Command]()
 
       // Create randomized key value tuples
@@ -69,6 +69,13 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
           }
       }
 
+    }
+
+    "have sequentially consistent state after atomic actions" in new StoreSystem {
+      val probe = createTestProbe[Command]()
+      // TODO: Implement this test
+      // Read up on sequential consistency and how to test it
+      // May need to add artificial delays to the actors to simulate network latency
     }
 
   }
