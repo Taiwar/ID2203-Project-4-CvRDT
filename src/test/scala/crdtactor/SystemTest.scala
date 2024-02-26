@@ -1,16 +1,8 @@
 package crdtactor
 
-import org.apache.pekko.actor.ActorSystem
-import org.apache.pekko.actor.typed.ActorRef
-import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
-import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
-import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.wordspec.AnyWordSpecLike
-
-import scala.collection.mutable
-
 
 class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
@@ -24,7 +16,9 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     // Create the actors
     val actors = (0 until N_ACTORS).map { i =>
       // Spawn the actor and get its reference (address)
-      val actorRef = spawn(Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(i, ctx) })
+      val actorRef = spawn(Behaviors.setup[CRDTActor.Command] { ctx =>
+        new CRDTActor(i, ctx)
+      })
       i -> actorRef
     }.toMap
 
@@ -41,10 +35,13 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       val probe = createTestProbe[Command]()
 
       // Create randomized key value tuples
-      val keyValues = (0 until N_ACTORS).map(_ => (Utils.randomString(), Utils.randomInt()))
+      val keyValues =
+        (0 until N_ACTORS).map(_ => (Utils.randomString(), Utils.randomInt()))
 
       // Send random put messages to all actors
-      actors.foreach((i, actorRef) => actorRef ! Put(keyValues(i)._1, keyValues(i)._2, probe.ref))
+      actors.foreach((i, actorRef) =>
+        actorRef ! Put(keyValues(i)._1, keyValues(i)._2, probe.ref)
+      )
       var responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
       responses.foreach {
         case putMsg: PutMsg =>
@@ -57,16 +54,15 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       Thread.sleep(100)
 
       // Send a get message for each key to each actor and verify the responses
-      keyValues.foreach {
-          case (key, value) =>
-          actors.foreach((_, actorRef) => actorRef ! Get(key, probe.ref))
-          responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
-          responses.foreach {
-              case getMsg: GetMsg =>
-              getMsg.value shouldEqual value
-              case msg =>
-              fail("Unexpected message: " + msg)
-          }
+      keyValues.foreach { case (key, value) =>
+        actors.foreach((_, actorRef) => actorRef ! Get(key, probe.ref))
+        responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
+        responses.foreach {
+          case getMsg: GetMsg =>
+            getMsg.value shouldEqual value
+          case msg =>
+            fail("Unexpected message: " + msg)
+        }
       }
 
     }

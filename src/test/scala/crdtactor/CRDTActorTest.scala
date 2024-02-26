@@ -4,7 +4,6 @@ import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.scalatest.wordspec.AnyWordSpecLike
 
-
 class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
   import CRDTActor.*
@@ -14,7 +13,9 @@ class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
     "send back state when sent ReadState" in {
       val probe = createTestProbe[Command]()
-      val crdtActor = spawn(Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(1, ctx) })
+      val crdtActor = spawn(Behaviors.setup[CRDTActor.Command] { ctx =>
+        new CRDTActor(1, ctx)
+      })
 
       crdtActor ! ReadState(probe.ref)
       val response = probe.receiveMessage()
@@ -30,7 +31,9 @@ class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
     "get a put item" in {
       val probe = createTestProbe[Command]()
-      val crdtActor = spawn(Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(1, ctx) })
+      val crdtActor = spawn(Behaviors.setup[CRDTActor.Command] { ctx =>
+        new CRDTActor(1, ctx)
+      })
 
       val key = "a"
       val value = 1
@@ -49,7 +52,7 @@ class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       response match {
         case getMsg: GetMsg =>
-          getMsg.value should be (value)
+          getMsg.value should be(value)
         case msg =>
           fail("Unexpected message: " + msg)
       }
