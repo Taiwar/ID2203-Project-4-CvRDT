@@ -68,11 +68,52 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     }
 
     "have sequentially consistent state after atomic actions" in new StoreSystem {
-      val probe = createTestProbe[Command]()
       // TODO: Implement this test
       // Read up on sequential consistency and how to test it
       // May need to add artificial delays to the actors to simulate network latency
-    }
+        val probe = createTestProbe[Command]()
+        val r = scala.util.Random
 
-  }
+        // Create a sequence of key value tuples
+        val sequence = (0 until N_ACTORS).map(i => (i, Utils.randomString(), Utils.randomInt()))
+
+        // Print the sequence
+        println("Sequence: " + sequence)
+
+        // Send put messages to all actors in sequence
+        sequence.foreach { case (seq, key, value) =>
+          actors.foreach((_, actorRef) =>
+            // Add a random chance the message is not sent to the actor
+            // if (r.nextInt(100) > 50) actorRef ! Put(key, value, probe.ref)
+            actorRef ! Put(key, value, probe.ref)
+          )
+
+          // Wait for all actors to process the put before proceeding to the next
+          var responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
+          responses.foreach {
+            case putMsg: PutResponse =>
+              putMsg should not be null
+            case msg =>
+              fail("Unexpected message: " + msg)
+          }
+        }
+
+        // Wait for sync messages (assuming partially synchronous system)
+        Thread.sleep(100)
+
+        // Send a get message for each key to each actor and verify the responses
+        sequence.foreach { case (_, key, value) =>
+          actors.foreach((_, actorRef) => actorRef ! Get(key, probe.ref))
+          var responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
+          responses.foreach {
+            case getMsg: GetResponse =>
+              //print the get message
+              println("Get message: " + getMsg)
+              getMsg.value shouldEqual value
+            case msg =>
+              fail("Unexpected message: " + msg)
+          }
+        }
+      }
+    }
 }
