@@ -1,9 +1,11 @@
 package crdtactor
 
+import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
-import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors}
 import org.apache.pekko.cluster.ddata
-import org.apache.pekko.cluster.ddata.ReplicatedDelta
+import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
+
+import scala.concurrent.duration.DurationInt
 
 object CRDTActorV1J {
   // The type of messages that the actor can handle
@@ -11,13 +13,15 @@ object CRDTActorV1J {
 
   // Messages containing the CRDT delta state exchanged between actors
   case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
-    extends Command
+      extends Command
 
   case class RequestSync(from: ActorRef[Command]) extends Command
 
-  case class GatherLocks(keys: Iterable[String], from: ActorRef[Command]) extends Command
+  case class GatherLocks(keys: Iterable[String], from: ActorRef[Command])
+      extends Command
 
-  case class ReleaseLocks(keys: Iterable[String], from: ActorRef[Command]) extends Command
+  case class ReleaseLocks(keys: Iterable[String], from: ActorRef[Command])
+      extends Command
 
   // Triggers the actor to start the computation (do this only once!)
   case object Start extends Command
@@ -28,7 +32,8 @@ object CRDTActorV1J {
   case class StateMsg(state: ddata.LWWMap[String, Int]) extends Command
 
   // Key-Value Ops
-  case class Put(key: String, value: Int, from: ActorRef[Command]) extends Command
+  case class Put(key: String, value: Int, from: ActorRef[Command])
+      extends Command
 
   case class PutResponse(key: String) extends Command
 
@@ -36,19 +41,26 @@ object CRDTActorV1J {
 
   case class GetResponse(key: String, value: Int) extends Command
 
-  case class Atomic(commands: Iterable[Command], from: ActorRef[Command]) extends Command
+  case class Atomic(commands: Iterable[Command], from: ActorRef[Command])
+      extends Command
 
-  case class AtomicResponse(responses: Iterable[Command]) extends Command
+  case class AtomicResponse(responses: Iterable[(String, Command)])
+      extends Command
+
+  // Timer
+  private case object Timeout extends Command
+  private case object TimerKey
 }
 
 import crdtactor.CRDTActorV1J.*
 
 // The actor implementation of the CRDT actor that uses a LWWMap CRDT to store the state
 class CRDTActorV1J(
-                    // id is the unique identifier of the actor, ctx is the actor context
-                    id: Int,
-                    ctx: ActorContext[Command]
-                  ) extends AbstractBehavior[Command](ctx) {
+    // id is the unique identifier of the actor, ctx is the actor context
+    id: Int,
+    ctx: ActorContext[Command],
+    timers: TimerScheduler[CRDTActorV1J.Command]
+) extends AbstractBehavior[Command](ctx) {
 
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
@@ -61,8 +73,16 @@ class CRDTActorV1J(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
-
   private val locks = scala.collection.mutable.Map[String, Int]()
+
+  private var dirty = false
+
+  // Start timer to periodically broadcast the delta
+  timers.startTimerWithFixedDelay(
+    TimerKey,
+    Timeout,
+    50.millis
+  )
 
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
@@ -80,10 +100,12 @@ class CRDTActorV1J(
         crdtstate = crdtstate.resetDelta // May be omitted
         others.foreach { //
           (name, actorRef) =>
+            Thread.sleep(Utils.RANDOM_BC_DELAY)
             actorRef !
               // Send the delta to the other actors
               DeltaMsg(ctx.self, delta)
         }
+        dirty = false
 
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
@@ -97,9 +119,14 @@ class CRDTActorV1J(
     case Put(key, value, from) =>
       ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
       crdtstate = crdtstate.put(selfNode, key, value)
+      dirty = true
       ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-      broadcastAndResetDeltas()
       from ! PutResponse(key)
+      Behaviors.same
+
+    case Timeout =>
+      if (!dirty) return Behaviors.same
+      broadcastAndResetDeltas()
       Behaviors.same
 
     case Get(key, from) =>
@@ -115,7 +142,12 @@ class CRDTActorV1J(
 
     case RequestSync(from) =>
       ctx.log.info(s"CRDTActor-$id: Sending delta to ${from.path.name}")
-      from ! DeltaMsg(ctx.self, crdtstate.delta.get)
+      Thread.sleep(Utils.RANDOM_BC_DELAY)
+      // Only send delta if is not empty
+      if (crdtstate.delta.isDefined) {
+        from ! DeltaMsg(ctx.self, crdtstate.delta.get)
+      }
+      // TODO: If we wait for responses from this, we should send an empty one here instead of nothing
       Behaviors.same
 
     case GatherLocks(keys, from) =>
@@ -138,24 +170,38 @@ class CRDTActorV1J(
       // Get all used keys from commands
       val keys = commands.flatMap {
         case Put(key, _, _) => Some(key)
-        case Get(key, _) => Some(key)
-        case _ => None
+        case Get(key, _)    => Some(key)
+        case _              => None
       }
 
       // Gather locks
       others.foreach { (_, actorRef) =>
+        Thread.sleep(Utils.RANDOM_BC_DELAY)
         actorRef ! GatherLocks(keys, ctx.self)
       }
 
       // Wait for locks
       // TODO Wait for responses
       Thread.sleep(100)
+
+      // Request sync
+      others.foreach { (_, actorRef) =>
+        Thread.sleep(Utils.RANDOM_BC_DELAY)
+        actorRef ! RequestSync(ctx.self)
+      }
+
+      // Wait for responses
+      // TODO Wait for responses
+      Thread.sleep(100)
+
+      // Execute commands
       val responses = commands.map {
         case Put(key, value, _) =>
           crdtstate = crdtstate.put(selfNode, key, value)
-          PutResponse(key)
+          dirty = true
+          (key, PutResponse(key))
         case Get(key, _) =>
-          GetResponse(key, crdtstate.get(key).getOrElse(0))
+          (key, GetResponse(key, crdtstate.get(key).getOrElse(0)))
         case _ => throw new Exception("Unexpected command")
       }
       // Send deltas
@@ -163,8 +209,13 @@ class CRDTActorV1J(
 
       // Release locks
       others.foreach { (_, actorRef) =>
+        Thread.sleep(Utils.RANDOM_BC_DELAY)
         actorRef ! ReleaseLocks(keys, ctx.self)
       }
+      // Wait for responses
+      // TODO Wait for responses
+      Thread.sleep(100)
+
       from ! AtomicResponse(responses)
       Behaviors.same
 
