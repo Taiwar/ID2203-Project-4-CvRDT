@@ -19,9 +19,6 @@ object CRDTActor {
   // Triggers the actor to start the computation (do this only once!)
   case object Start extends Command
 
-  // Triggers the actor to consume an operation (do this repeatedly!)
-  case object ConsumeOperation extends Command
-
   // For testing: Messages to read the current state of the CRDT
   case class ReadState(from: ActorRef[Command]) extends Command
 
@@ -30,11 +27,11 @@ object CRDTActor {
   // Key-Value Ops
   case class Put(key: String, value: Int, from: ActorRef[Command]) extends Command
 
-  case class PutMsg(key: String) extends Command
+  case class PutResponse(key: String) extends Command
 
   case class Get(key: String, from: ActorRef[Command]) extends Command
 
-  case class GetMsg(key: String, value: Int) extends Command
+  case class GetResponse(key: String, value: Int) extends Command
 }
 
 import CRDTActor.*
@@ -87,27 +84,17 @@ class CRDTActor(
       // ctx.self ! ConsumeOperation // start consuming operations
       Behaviors.same
 
-    case ConsumeOperation =>
-      val key = Utils.randomString()
-      val value = Utils.randomInt()
-      ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-      crdtstate = crdtstate.put(selfNode, key, value)
-      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-      broadcastAndResetDeltas()
-      ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
-      Behaviors.same
-
     case Put(key, value, from) =>
       ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
       crdtstate = crdtstate.put(selfNode, key, value)
       ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
       broadcastAndResetDeltas()
-      from ! PutMsg(key)
+      from ! PutResponse(key)
       Behaviors.same
 
     case Get(key, from) =>
       ctx.log.info(s"CRDTActor-$id: Sending value of $key to ${from.path.name}")
-      from ! GetMsg(key, crdtstate.get(key).getOrElse(0))
+      from ! GetResponse(key, crdtstate.get(key).getOrElse(0))
       Behaviors.same
 
     case DeltaMsg(from, delta) =>

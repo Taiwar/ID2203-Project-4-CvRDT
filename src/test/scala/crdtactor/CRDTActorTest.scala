@@ -41,7 +41,7 @@ class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       var response = probe.receiveMessage()
 
       response match {
-        case putMsg: PutMsg =>
+        case putMsg: PutResponse =>
           putMsg should not be null
         case msg =>
           fail("Unexpected message: " + msg)
@@ -51,7 +51,7 @@ class CRDTActorTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       response = probe.receiveMessage()
 
       response match {
-        case getMsg: GetMsg =>
+        case getMsg: GetResponse =>
           getMsg.value should be(value)
         case msg =>
           fail("Unexpected message: " + msg)

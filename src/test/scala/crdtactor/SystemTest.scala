@@ -44,7 +44,7 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       )
       var responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
       responses.foreach {
-        case putMsg: PutMsg =>
+        case putMsg: PutResponse =>
           putMsg should not be null
         case msg =>
           fail("Unexpected message: " + msg)
@@ -58,7 +58,7 @@ class SystemTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         actors.foreach((_, actorRef) => actorRef ! Get(key, probe.ref))
         responses = (0 until N_ACTORS).map(_ => probe.receiveMessage())
         responses.foreach {
-          case getMsg: GetMsg =>
+          case getMsg: GetResponse =>
             getMsg.value shouldEqual value
           case msg =>
             fail("Unexpected message: " + msg)
