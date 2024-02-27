@@ -1,13 +1,11 @@
 package crdtactor
 
-import org.slf4j.{Logger => SLLogger}
-import org.slf4j.{LoggerFactory => SLLoggerFactory}
-import ch.qos.logback.classic.{Level => LBLevel}
-import ch.qos.logback.classic.{Logger => LBLogger}
-import ch.qos.logback.classic.{LoggerContext => LBLoggerContext}
+import ch.qos.logback.classic.{Level as LBLevel, LoggerContext as LBLoggerContext}
 import org.apache.pekko.actor.Address
-import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.cluster.UniqueAddress
+import org.apache.pekko.cluster.ddata.SelfUniqueAddress
+import org.slf4j.{Logger as SLLogger, LoggerFactory as SLLoggerFactory}
+
 import java.util.concurrent.ThreadLocalRandom
 
 object Utils {
@@ -34,6 +32,10 @@ object Utils {
   // Global state which can be shared between the actors
   // Note: this is an "anti-pattern", use it only for the bootstrapping process
   final val GLOBAL_STATE = new SynchronizedState()
+  final val RANDOM_BC_DELAY = 0
+
+  // Pessimistic total estimated delay for testing purposes
+  final val RANDOM_BC_DELAY_SAFE = (RANDOM_BC_DELAY + 10) * 10
 
   private val r = new scala.util.Random
   def randomString(): String =
@@ -57,7 +59,7 @@ object Utils {
       case _ => throw new IllegalArgumentException(s"Unknown log level: $level")
 
   // Creates a unique address for use as node identifiers in the CRDT library
-  // Example: 
+  // Example:
   // val selfNode = Utils.nodeFactory()
   // crdtstate.put(selfNode, key, value)
   def nodeFactory() =
