@@ -4,9 +4,9 @@ import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.scalatest.wordspec.AnyWordSpecLike
 
-class SystemTestV1J extends ScalaTestWithActorTestKit with AnyWordSpecLike {
+class SystemTestV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
-  import CRDTActorV1J.*
+  import CRDTActorV2.*
 
   trait StoreSystem {
     val N_ACTORS = 8
@@ -16,8 +16,8 @@ class SystemTestV1J extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     // Create the actors
     val actors = (0 until N_ACTORS).map { i =>
       // Spawn the actor and get its reference (address)
-      val actorRef = spawn(Behaviors.setup[CRDTActorV1J.Command] { ctx =>
-        Behaviors.withTimers(timers => new CRDTActorV1J(i, ctx, timers))
+      val actorRef = spawn(Behaviors.setup[CRDTActorV2.Command] { ctx =>
+        Behaviors.withTimers(timers => new CRDTActorV2(i, ctx, timers))
       })
       i -> actorRef
     }.toMap
@@ -26,7 +26,7 @@ class SystemTestV1J extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
 
     // Start the actors
-    actors.foreach((_, actorRef) => actorRef ! CRDTActorV1J.Start)
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV2.Start)
   }
 
   "The system" must {

@@ -32,10 +32,10 @@ object Utils {
   // Global state which can be shared between the actors
   // Note: this is an "anti-pattern", use it only for the bootstrapping process
   final val GLOBAL_STATE = new SynchronizedState()
-  final val RANDOM_BC_DELAY = 0
+  final val RANDOM_BC_DELAY = 200
 
   // Pessimistic total estimated delay for testing purposes
-  final val RANDOM_BC_DELAY_SAFE = (RANDOM_BC_DELAY + 10) * 10
+  final val RANDOM_BC_DELAY_SAFE = (RANDOM_BC_DELAY + 10) * 20
 
   private val r = new scala.util.Random
   def randomString(): String =

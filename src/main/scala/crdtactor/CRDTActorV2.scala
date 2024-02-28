@@ -13,15 +13,15 @@ object CRDTActorV2 {
 
   // Messages containing the CRDT delta state exchanged between actors
   case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
-      extends Command
+    extends Command
 
   case class RequestSync(from: ActorRef[Command]) extends Command
 
   case class GatherLocks(keys: Iterable[String], from: ActorRef[Command])
-      extends Command
+    extends Command
 
   case class ReleaseLocks(keys: Iterable[String], from: ActorRef[Command])
-      extends Command
+    extends Command
 
   // Triggers the actor to start the computation (do this only once!)
   case object Start extends Command
@@ -33,7 +33,7 @@ object CRDTActorV2 {
 
   // Key-Value Ops
   case class Put(key: String, value: Int, from: ActorRef[Command])
-      extends Command
+    extends Command
 
   case class PutResponse(key: String) extends Command
 
@@ -42,10 +42,10 @@ object CRDTActorV2 {
   case class GetResponse(key: String, value: Int) extends Command
 
   case class Atomic(commands: Iterable[Command], from: ActorRef[Command])
-      extends Command
+    extends Command
 
   case class AtomicResponse(responses: Iterable[(String, Command)])
-      extends Command
+    extends Command
 
   // Timer
   private case object Timeout extends Command
@@ -56,11 +56,11 @@ import crdtactor.CRDTActorV2.*
 
 // The actor implementation of the CRDT actor that uses a LWWMap CRDT to store the state
 class CRDTActorV2(
-    // id is the unique identifier of the actor, ctx is the actor context
-    id: Int,
-    ctx: ActorContext[Command],
-    timers: TimerScheduler[CRDTActorV2.Command]
-) extends AbstractBehavior[Command](ctx) {
+                   // id is the unique identifier of the actor, ctx is the actor context
+                   id: Int,
+                   ctx: ActorContext[Command],
+                   timers: TimerScheduler[CRDTActorV2.Command]
+                 ) extends AbstractBehavior[Command](ctx) {
 
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
@@ -74,6 +74,7 @@ class CRDTActorV2(
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
   private val locks = scala.collection.mutable.Map[String, Int]()
+  private val commandBuffer = scala.collection.mutable.Queue[Command]()
 
   private var dirty = false
 
@@ -118,6 +119,11 @@ class CRDTActorV2(
 
     case Put(key, value, from) =>
       ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+      // Check lock for key
+      if (locks.getOrElse(key, 0) > 0) {
+        commandBuffer.enqueue(Put(key, value, from))
+        return Behaviors.same
+      }
       crdtstate = crdtstate.put(selfNode, key, value)
       dirty = true
       ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
@@ -125,12 +131,22 @@ class CRDTActorV2(
       Behaviors.same
 
     case Timeout =>
+      // Work through and empty buffer
+      while (commandBuffer.nonEmpty) {
+        val command = commandBuffer.dequeue()
+        ctx.self ! command
+      }
       if (!dirty) return Behaviors.same
       broadcastAndResetDeltas()
       Behaviors.same
 
     case Get(key, from) =>
       ctx.log.info(s"CRDTActor-$id: Sending value of $key to ${from.path.name}")
+      // Check lock for key
+      if (locks.getOrElse(key, 0) > 0) {
+        commandBuffer.enqueue(Get(key, from))
+        return Behaviors.same
+      }
       from ! GetResponse(key, crdtstate.get(key).getOrElse(0))
       Behaviors.same
 
