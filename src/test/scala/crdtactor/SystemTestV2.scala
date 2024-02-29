@@ -3,6 +3,7 @@ package crdtactor
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.scalatest.wordspec.AnyWordSpecLike
+import concurrent.duration.DurationInt
 
 class SystemTestV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
@@ -158,6 +159,57 @@ class SystemTestV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       // a1 and b2 should be 150
       a1 shouldEqual 150
       b1 shouldEqual 150
+    }
+
+    "have working heartbeat handling" in new StoreSystem {
+      // Create a probe for the failure detector and the actor
+      val probeCRDT = createTestProbe[crdtactor.CRDTActorV2.Command]()
+      val probeFailureDetector = createTestProbe[ActorFailureDetector.Command]()
+
+      // Spawn the failure detector and give it a name
+      val failureDetector = spawn(Behaviors.setup[ActorFailureDetector.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorFailureDetector(0, ctx, timers))
+      }, "failureDetector")
+
+      println("Sending the heartbeat")
+
+      // Send a Heartbeat message to the actor
+      actors(0) ! CRDTActorV2.Heartbeat(failureDetector)
+
+//      println("Expecting the heartbeat ack")
+
+//      println("Sleeping for 5 seconds")
+
+      // Expect a HeartbeatAck message from the actor to the failure detector
+//      probeFailureDetector.expectMessage(ActorFailureDetector.HeartbeatAck(actors(0)))
+//
+//      // Expect a HeartbeatAck message from the actor to the failure detector
+//      probeCRDT.expectMessage(CRDTActorV2.Heartbeat(failureDetector))
+
+//      Thread.sleep(10000)
+//      // Send a Heartbeat message to the actor
+//      actors(0) ! Heartbeat(ActorFailureDetector.Heartbeat(probe.ref))
+//
+//      // Expect a HeartbeatAck message from the actor
+//      probe.expectMessage(ActorFailureDetector.HeartbeatAck(actorRef))
+//
+//      // Expect no message for the duration of the timeout interval
+//      probe.expectNoMessage(ActorFailureDetector.delta)
+//
+//      // Send a Timeout message to the actor
+//      actorRef ! ActorFailureDetector.Timeout
+//
+//      // Expect a MortalityNoticeWrapper message from the actor
+//      probe.expectMessageType[ActorFailureDetector.MortalityNoticeWrapper]
+
+      // Receive one message
+//      probe.receiveMessage()
+
+//      // Send a Timeout message to the actor
+//      actors(0) ! ActorFailureDetector.Timeout
+//
+//      // Expect a MortalityNoticeWrapper message from the actor
+//      probe.expectMessageType[ActorFailureDetector.MortalityNoticeWrapper]
     }
 
   }
