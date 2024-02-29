@@ -38,6 +38,15 @@ object CRDTActorV3 {
       extends Indication
 
   // Internal messages
+
+  // Internal forwarding of atomic messages
+  case class ForwardAtomic(
+      origin: ActorRef[Command],
+      commands: Iterable[Command],
+      from: ActorRef[Command]
+  ) extends Command
+
+  // Periodic delta messages
   private case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
       extends Command
 
@@ -62,6 +71,9 @@ object CRDTActorV3 {
 
   private case object Timeout extends Command
   private case object TimerKey
+
+  // Ballot leader election messages
+  case class Leader(leader: ActorRef[Command]) extends Command
 }
 
 import crdtactor.CRDTActorV3.*
@@ -85,13 +97,14 @@ class CRDTActorV3(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
+  private var leader: Option[ActorRef[Command]] = None
+
   private var time = (id, 0)
-  // TODO: Associate transactions with actors, so we can handle failures
   private val pendingTransactionLocks =
     scala.collection.mutable.Map[(Int, Int), Int]()
   private val pendingTransactions =
-    scala.collection.mutable.Map[(Int, Int), Atomic]()
-  // TODO: Associate locks with transactions
+    scala.collection.mutable.Map[(Int, Int), ForwardAtomic]()
+  // TODO: Remove locks if leader dies
   private val locks = scala.collection.mutable.Map[String, Int]()
   private val commandBuffer = scala.collection.mutable.Queue[Command]()
 
@@ -131,6 +144,12 @@ class CRDTActorV3(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
+    // Handle leader
+    case Leader(l) =>
+      ctx.log.info(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
+      leader = Some(l)
+      Behaviors.same
+
     case Put(key, value, from) =>
       ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
       // Check lock for key
@@ -172,6 +191,7 @@ class CRDTActorV3(
 
     case Prepare(timestamp, keys, from) =>
       ctx.log.info(s"CRDTActor-$id: Consuming Prepare operation $timestamp")
+      // TODO: Do we need to keep track of pending things here?
       keys.foreach { key =>
         locks(key) = locks.getOrElse(key, 0) + 1
       }
@@ -221,7 +241,7 @@ class CRDTActorV3(
         pendingTransactions -= timestamp
 
         // Respond to client
-        tx.from ! AtomicResponse(responses)
+        tx.origin ! AtomicResponse(responses)
 
         // Send commit to all others to unlock keys
         others.foreach { (_, actorRef) =>
@@ -245,9 +265,27 @@ class CRDTActorV3(
 
     case Atomic(commands, from) =>
       ctx.log.info(s"CRDTActor-$id: Consuming atomic operation $commands")
+      // If we are not the leader, forward to leader
+      leader match
+        case Some(l) =>
+          l ! ForwardAtomic(from, commands, ctx.self)
+        case None =>
+          // TODO: Respond with error
+          ctx.log.info(s"CRDTActor-$id: No leader")
+      Behaviors.same
+
+    case ForwardAtomic(origin, commands, from) =>
       // Create new unique tid
       time = (time._1, time._2 + 1)
       val timestamp = time
+
+      // Add new transaction to transactions
+      pendingTransactionLocks += (timestamp -> 0)
+      pendingTransactions += (timestamp -> ForwardAtomic(
+        origin,
+        commands,
+        from
+      ))
 
       // Get all used keys from commands
       val keys = commands.flatMap {
@@ -256,21 +294,18 @@ class CRDTActorV3(
         case _              => None
       }
 
-      // Add new transaction to transactions
-      pendingTransactionLocks += (timestamp -> 0)
-      pendingTransactions += (timestamp -> Atomic(commands, from))
+      // TODO: Check if we already have locks on some keys and queue the transaction if so
 
       // Lock own keys
       keys.foreach { key =>
         locks(key) = locks.getOrElse(key, 0) + 1
       }
 
-      // Gather locks
+      // Send prepare to others
       others.foreach { (_, actorRef) =>
         Thread.sleep(Utils.RANDOM_BC_DELAY)
         actorRef ! Prepare(timestamp, keys, ctx.self)
       }
-
       Behaviors.same
 
     // Only used for testing

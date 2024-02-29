@@ -24,6 +24,11 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
     // Write actor addresses into the global state
     actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
+
+    // Set leader (BLE mock)
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV3.Leader(actors(0)))
+
+    Thread.sleep(50) // Wait for actors to be ready
   }
 
   "The system" must {
@@ -171,5 +176,8 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       (a2 == 150 && b2 == 150) shouldEqual true
     }
 
+    "have sequentially consistent state after concurrent atomic actions" in new StoreSystem {
+      // TODO
+    }
   }
 }
