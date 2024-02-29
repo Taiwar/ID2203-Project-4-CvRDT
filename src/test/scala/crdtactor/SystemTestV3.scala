@@ -1,8 +1,10 @@
 package crdtactor
 
-import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
+import org.apache.pekko.actor.testkit.typed.scaladsl.{ScalaTestWithActorTestKit, TestProbe}
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.scalatest.wordspec.AnyWordSpecLike
+
+import scala.util.Random
 
 class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
@@ -53,7 +55,7 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       }
 
       // Wait for sync messages (assuming partially synchronous system)
-      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE + Utils.CRDT_SYNC_PERIOD)
 
       // Send a get message for each key to each actor and verify the responses
       keyValues.foreach { case (key, value) =>
@@ -177,7 +179,57 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     }
 
     "have sequentially consistent state after concurrent atomic actions" in new StoreSystem {
-      // TODO
+      Utils.setLoggerLevel("INFO")
+      val probe: TestProbe[Command] = createTestProbe[Command]()
+      // Setup key a to be 0
+      actors(0) ! Put("a", 0, probe.ref)
+      // Wait for sync
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Send put messages to random actors for 2 seconds on a separate thread
+      val putThread = new Thread(() => {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < 2000) {
+          val actorRef = actors(Random.between(0, N_ACTORS))
+          // Send two atomic puts
+          actorRef ! Atomic(
+            Array(Put("a", 1, probe.ref), Put("a", 2, probe.ref)),
+            probe.ref
+          )
+          Thread.sleep(25)
+        }
+      })
+      // Start put thread
+      putThread.start()
+
+      val start = System.currentTimeMillis()
+      while (System.currentTimeMillis() - start < 2000) {
+        val actorRef = actors(Random.between(0, N_ACTORS))
+        actorRef ! Get("a", probe.ref)
+        // Check if response is GetResponse and get value
+        probe.receiveMessage() match {
+          case GetResponse(key, value) =>
+            // value should be 2 or 0
+            key shouldEqual "a"
+            // Log value
+            println(s"Read value: $value")
+            value should (equal(2) or equal(0))
+          case msg => ()
+        }
+        Thread.sleep(100)
+      }
+
+      // Create new probe with empty inbox
+      val probe2: TestProbe[Command] = createTestProbe[Command]()
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+      // Eventually, and actor reads new value of a
+      actors(0) ! Get("a", probe2.ref)
+      val a = probe2.receiveMessage().asInstanceOf[GetResponse].value
+      println(s"Final value of a: $a")
+
+      // a should be 2
+      a shouldEqual 2
     }
   }
 }

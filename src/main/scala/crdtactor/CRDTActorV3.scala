@@ -94,13 +94,20 @@ class CRDTActorV3(
 
   // Hack to get the actor references of the other actors, check out `lazy val`
   // Careful: make sure you know what you are doing if you are editing this code
-  private lazy val others =
+  private lazy val everyone =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
+
+  // Make copy of everyone and remove self
+  private lazy val others = everyone - id
+
+  // The leader of the system
 
   private var leader: Option[ActorRef[Command]] = None
 
   private var time = (id, 0)
   private val pendingTransactionLocks =
+    scala.collection.mutable.Map[(Int, Int), Iterable[String]]()
+  private val pendingTransactionAgreement =
     scala.collection.mutable.Map[(Int, Int), Int]()
   private val pendingTransactions =
     scala.collection.mutable.Map[(Int, Int), ForwardAtomic]()
@@ -114,7 +121,7 @@ class CRDTActorV3(
   timers.startTimerWithFixedDelay(
     TimerKey,
     Timeout,
-    50.millis
+    Utils.CRDT_SYNC_PERIOD.milliseconds
   )
 
   // Note: you probably want to modify this method to be more efficient
@@ -133,7 +140,6 @@ class CRDTActorV3(
         crdtstate = crdtstate.resetDelta // May be omitted
         others.foreach { //
           (name, actorRef) =>
-            Thread.sleep(Utils.RANDOM_BC_DELAY)
             actorRef !
               // Send the delta to the other actors
               DeltaMsg(ctx.self, delta)
@@ -146,70 +152,63 @@ class CRDTActorV3(
   override def onMessage(msg: Command): Behavior[Command] = msg match
     // Handle leader
     case Leader(l) =>
-      ctx.log.info(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
+      ctx.log.debug(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
       leader = Some(l)
       Behaviors.same
 
-    case Put(key, value, from) =>
-      ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-      // Check lock for key
-      if (locks.getOrElse(key, 0) > 0) {
-        commandBuffer.enqueue(Put(key, value, from))
-        return Behaviors.same
-      }
-      crdtstate = crdtstate.put(selfNode, key, value)
-      dirty = true
-      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-      from ! PutResponse(key)
-      Behaviors.same
-
     case Timeout =>
-      // Work through and empty buffer
-      // TODO: Could probably do this smarter in commit handler
-      while (commandBuffer.nonEmpty) {
-        val command = commandBuffer.dequeue()
-        ctx.self ! command
-      }
-
       // Send deltas if dirty
       if (!dirty) return Behaviors.same
       broadcastAndResetDeltas()
       Behaviors.same
 
+    case Put(key, value, from) =>
+      // Check lock for key
+      if (locks.getOrElse(key, 0) > 0) {
+        commandBuffer.enqueue(Put(key, value, from))
+        return Behaviors.same
+      }
+      ctx.log.debug(s"CRDTActor-$id: Executing PUT $key -> $value")
+      crdtstate = crdtstate.put(selfNode, key, value)
+      dirty = true
+      ctx.log.debug(s"CRDTActor-$id: CRDT state: $crdtstate")
+      from ! PutResponse(key)
+      Behaviors.same
+
     case Get(key, from) =>
-      ctx.log.info(s"CRDTActor-$id: Sending value of $key to ${from.path.name}")
       // Check lock for key
       if (locks.getOrElse(key, 0) > 0) {
         commandBuffer.enqueue(Get(key, from))
         return Behaviors.same
       }
+      ctx.log.debug(s"CRDTActor-$id: Executing GET $key")
       from ! GetResponse(key, crdtstate.get(key).getOrElse(0))
       Behaviors.same
 
     case DeltaMsg(from, delta) =>
-      ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
+      ctx.log.debug(s"CRDTActor-$id: Received delta from ${from.path.name}")
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
       Behaviors.same
 
     case Prepare(timestamp, keys, from) =>
-      ctx.log.info(s"CRDTActor-$id: Consuming Prepare operation $timestamp")
-      // TODO: Do we need to keep track of pending things here?
+      ctx.log.debug(s"CRDTActor-$id: Consuming Prepare operation $timestamp")
+      pendingTransactionLocks += (timestamp -> keys)
       keys.foreach { key =>
-        locks(key) = locks.getOrElse(key, 0) + 1
+        locks(key) = 1
       }
       // We don't need to execute the transaction on every node like in full 2PC, for SC it's enough to get the result sent to us by the leader later
       from ! PrepareResponse(timestamp, ctx.self, crdtstate.delta)
       Behaviors.same
 
     case PrepareResponse(timestamp, _, delta) =>
-      ctx.log.info(
+      ctx.log.debug(
         s"CRDTActor-$id: Consuming PrepareResponse operation $timestamp"
       )
 
-      // Increment transaction tracker
-      pendingTransactionLocks(timestamp) =
-        pendingTransactionLocks(timestamp) + 1
+      // Increment agreement tracker
+      pendingTransactionAgreement(timestamp) =
+        pendingTransactionAgreement(timestamp) + 1
 
       // Merge the delta into the local CRDT state
       delta match
@@ -217,8 +216,8 @@ class CRDTActorV3(
           crdtstate = crdtstate.mergeDelta(d.asInstanceOf)
         case None => ()
 
-      // If we got all responses (including ourselves), commit
-      if (pendingTransactionLocks(timestamp) == others.size + 1) {
+      // If we got all responses, commit
+      if (pendingTransactionAgreement(timestamp) == others.size) {
         ctx.log.info(
           s"CRDTActor-$id: All locks acquired for transaction $timestamp"
         )
@@ -240,58 +239,50 @@ class CRDTActorV3(
         }
 
         // Remove transaction from pending
-        pendingTransactionLocks -= timestamp
+        pendingTransactionAgreement -= timestamp
         pendingTransactions -= timestamp
 
         // Respond to client
         tx.origin ! AtomicResponse(responses)
 
         // Send commit to all others to unlock keys
-        others.foreach { (_, actorRef) =>
-          Thread.sleep(Utils.RANDOM_BC_DELAY)
+        everyone.foreach { (_, actorRef) =>
           actorRef ! Commit(timestamp, ctx.self)
         }
-        // Send commit to self
-        ctx.self ! Commit(timestamp, ctx.self)
       }
       Behaviors.same
 
     // Handle commit
     case Commit(timestamp, from) =>
-      ctx.log.info(s"CRDTActor-$id: Consuming Commit operation $timestamp")
+      ctx.log.debug(s"CRDTActor-$id: Consuming Commit operation $timestamp")
       // Unlock keys
+      val keys = pendingTransactionLocks(timestamp)
+      keys.foreach { key =>
+        locks(key) = 0
+      }
       pendingTransactionLocks -= timestamp
-      pendingTransactions -= timestamp
-      // TODO: We should only unlock keys of that transaction
-      locks.foreach { case (key, value) =>
-        locks(key) = locks.getOrElse(key, 0) - 1
+
+      // Work through and empty buffer
+
+      ctx.log.info(s"CRDTActor-$id: Executing buffered commands")
+      while (commandBuffer.nonEmpty) {
+        val command = commandBuffer.dequeue()
+        ctx.self ! command
       }
       Behaviors.same
 
     case Atomic(commands, from) =>
-      ctx.log.info(s"CRDTActor-$id: Consuming atomic operation $commands")
+      ctx.log.debug(s"CRDTActor-$id: Consuming atomic operation $commands")
       // If we are not the leader, forward to leader
       leader match
         case Some(l) =>
           l ! ForwardAtomic(from, commands, ctx.self)
         case None =>
           // TODO: Respond with error
-          ctx.log.info(s"CRDTActor-$id: No leader")
+          ctx.log.warn(s"CRDTActor-$id: No leader")
       Behaviors.same
 
     case ForwardAtomic(origin, commands, from) =>
-      // Create new unique tid
-      time = (time._1, time._2 + 1)
-      val timestamp = time
-
-      // Add new transaction to transactions
-      pendingTransactionLocks += (timestamp -> 0)
-      pendingTransactions += (timestamp -> ForwardAtomic(
-        origin,
-        commands,
-        from
-      ))
-
       // Get all used keys from commands
       val keys = commands.flatMap {
         case Put(key, _, _) => Some(key)
@@ -301,26 +292,43 @@ class CRDTActorV3(
 
       // Check if we already have locks on some keys and queue the transaction if so
       if (keys.exists(key => locks.getOrElse(key, 0) > 0)) {
-        ctx.log.info(
-          s"CRDTActor-$id: Queuing transaction $timestamp due to locks"
+        ctx.log.debug(
+          s"Leader-$id: Queuing transaction due to locks"
         )
+
         commandBuffer.enqueue(ForwardAtomic(origin, commands, from))
         return Behaviors.same
       }
 
-      // Send prepare to self
-      ctx.self ! Prepare(timestamp, keys, ctx.self)
+      // Create new unique tid
+      time = (time._1, time._2 + 1)
+      val timestamp = time
+
+      ctx.log.info(s"Leader-$id: Starting transaction $timestamp")
+
+      // Add new transaction to transactions
+      pendingTransactionAgreement += (timestamp -> 0)
+      pendingTransactions += (timestamp -> ForwardAtomic(
+        origin,
+        commands,
+        from
+      ))
+
+      // Do own "Prepare" now, if we just send commit to ourselves we could accept another transaction before we have the locks
+      pendingTransactionLocks += (timestamp -> keys)
+      keys.foreach { key =>
+        locks(key) = 1
+      }
 
       // Send prepare to others
       others.foreach { (_, actorRef) =>
-        Thread.sleep(Utils.RANDOM_BC_DELAY)
         actorRef ! Prepare(timestamp, keys, ctx.self)
       }
       Behaviors.same
 
     // Only used for testing
     case GetState(from) =>
-      ctx.log.info(s"CRDTActor-$id: Sending state to ${from.path.name}")
+      ctx.log.debug(s"CRDTActor-$id: Sending state to ${from.path.name}")
       from ! State(crdtstate)
       Behaviors.same
 
