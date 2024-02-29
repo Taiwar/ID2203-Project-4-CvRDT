@@ -38,10 +38,10 @@ object ActorFailureDetector {
   // Time
 
   // Time between heartbeats interval (Gamma γ)
-  val gamma = 50.millis
+  val gamma = 500.millis
 
   // Timeout interval (Delta δ)
-  val delta = 100.millis
+  val delta = 50.millis
 
   // Total wait time (time T)
   val T = gamma + delta
@@ -74,18 +74,13 @@ class ActorFailureDetector(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
-  private val locks = scala.collection.mutable.Map[String, Int]()
-  private val commandBuffer = scala.collection.mutable.Queue[Command]()
-
-  private var dirty = false
-
   // Start the failure detector timer
   private def startFailureDetectorTimer(): Unit = {
     // Start the failure detector timer
     timers.startTimerWithFixedDelay(
       TimerKey,
       Heartbeat(),
-      gamma
+      gamma // Time between heartbeats interval (Gamma γ)
     )
   }
 
@@ -100,29 +95,6 @@ class ActorFailureDetector(
     timers.cancel(TimerKey)
     startFailureDetectorTimer() // Reset the timer
   }
-
-  // Note: you probably want to modify this method to be more efficient
-  private def broadcastAndResetDeltas(): Unit =
-    // Broadcast the delta to all other actors and reset the delta
-    // CRDT-Delta: https://pekko.apache.org/docs/pekko/current//typed/distributed-data.html#delta-crdt
-    val deltaOption = crdtstate.delta
-
-    // The deltaOption is an instance of Option,
-    // a Scala container type that can either hold a value (Some)
-    // or no value (None). This is used to represent the presence
-    // or absence of a value, providing a safer alternative to null references.
-    deltaOption match
-      case None => ()
-      case Some(delta) =>
-        crdtstate = crdtstate.resetDelta // May be omitted
-        others.foreach { //
-          (name, actorRef) =>
-            Thread.sleep(Utils.RANDOM_BC_DELAY)
-//            actorRef !
-              // Send the delta to the other actors
-//              DeltaMsg(ctx.self, delta)
-        }
-        dirty = false
 
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
@@ -151,7 +123,7 @@ class ActorFailureDetector(
 
     // Heartbeat handling
     case Heartbeat() =>
-      ctx.log.info(s"FailureDetector-$id: Received heartbeat")
+      ctx.log.info(s"FailureDetector-$id: Sending heartbeat")
       // Send the heartbeat message to the sender
       messageSender.get ! CRDTActorV2.Heartbeat(ctx.self)
       // Start timeout timer
