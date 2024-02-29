@@ -165,10 +165,13 @@ class CRDTActorV3(
 
     case Timeout =>
       // Work through and empty buffer
+      // TODO: Could probably do this smarter in commit handler
       while (commandBuffer.nonEmpty) {
         val command = commandBuffer.dequeue()
         ctx.self ! command
       }
+
+      // Send deltas if dirty
       if (!dirty) return Behaviors.same
       broadcastAndResetDeltas()
       Behaviors.same
@@ -195,7 +198,7 @@ class CRDTActorV3(
       keys.foreach { key =>
         locks(key) = locks.getOrElse(key, 0) + 1
       }
-      // We don't need to execute the transaction ourselves like in full 2PC, for SC it's enough to get the result sent to us later
+      // We don't need to execute the transaction on every node like in full 2PC, for SC it's enough to get the result sent to us by the leader later
       from ! PrepareResponse(timestamp, ctx.self, crdtstate.delta)
       Behaviors.same
 
@@ -214,8 +217,8 @@ class CRDTActorV3(
           crdtstate = crdtstate.mergeDelta(d.asInstanceOf)
         case None => ()
 
-      // If we got all responses, commit
-      if (pendingTransactionLocks(timestamp) == others.size) {
+      // If we got all responses (including ourselves), commit
+      if (pendingTransactionLocks(timestamp) == others.size + 1) {
         ctx.log.info(
           s"CRDTActor-$id: All locks acquired for transaction $timestamp"
         )
@@ -248,6 +251,8 @@ class CRDTActorV3(
           Thread.sleep(Utils.RANDOM_BC_DELAY)
           actorRef ! Commit(timestamp, ctx.self)
         }
+        // Send commit to self
+        ctx.self ! Commit(timestamp, ctx.self)
       }
       Behaviors.same
 
@@ -294,12 +299,17 @@ class CRDTActorV3(
         case _              => None
       }
 
-      // TODO: Check if we already have locks on some keys and queue the transaction if so
-
-      // Lock own keys
-      keys.foreach { key =>
-        locks(key) = locks.getOrElse(key, 0) + 1
+      // Check if we already have locks on some keys and queue the transaction if so
+      if (keys.exists(key => locks.getOrElse(key, 0) > 0)) {
+        ctx.log.info(
+          s"CRDTActor-$id: Queuing transaction $timestamp due to locks"
+        )
+        commandBuffer.enqueue(ForwardAtomic(origin, commands, from))
+        return Behaviors.same
       }
+
+      // Send prepare to self
+      ctx.self ! Prepare(timestamp, keys, ctx.self)
 
       // Send prepare to others
       others.foreach { (_, actorRef) =>
