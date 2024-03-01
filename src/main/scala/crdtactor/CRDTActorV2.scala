@@ -25,7 +25,7 @@ object CRDTActorV2 {
     extends Command
 
   // Triggers the actor to start the computation (do this only once!)
-  case object Start extends Command
+  case class Start() extends Command
 
   // For testing: Messages to read the current state of the CRDT
   case class ReadState(from: ActorRef[Command]) extends Command
@@ -48,7 +48,7 @@ object CRDTActorV2 {
   case class AtomicResponse(responses: Iterable[(String, Command)])
     extends Command
 
-  case class MortalityNotice(from: ActorRef[Command]) extends Command
+  case class MortalityNotice(actor: ActorRef[Command]) extends Command
 
   // Timer
   private case object Timeout extends Command
@@ -58,7 +58,7 @@ object CRDTActorV2 {
   case object StartFailureDetector extends Command
 
   // Heartbeat
-  case class Heartbeat(from: ActorRef[ActorFailureDetector.Command]) extends Command
+  case class Heartbeat(from: ActorRef[ActorFailureDetector.Command], delay: Boolean) extends Command
   case class HeartbeatAck(from: ActorRef[Command]) extends Command
 }
 
@@ -129,7 +129,7 @@ class CRDTActorV2(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
-    case Start =>
+    case Start() =>
       ctx.log.info(s"CRDTActor-$id started")
 
       // Start the failure detector
@@ -275,18 +275,24 @@ class CRDTActorV2(
       Behaviors.same
 
     // Heartbeat handling
-    case Heartbeat(from) =>
+    case Heartbeat(from, delay) =>
       ctx.log.info(s"CRDTActor-$id: Received heartbeat")
-      // Send ack back to the sender
-      from ! ActorFailureDetector.HeartbeatAck(ctx.self)
+
+      if (delay) {
+        ctx.scheduleOnce(600.millis, ctx.self, Heartbeat(from, false))
+      } else {
+        // Send ack back to the sender
+        from ! ActorFailureDetector.HeartbeatAck(ctx.self)
+      }
+
       Behaviors.same
 
     case HeartbeatAck(from) =>
       ctx.log.info(s"CRDTActor-$id: Received heartbeat ack")
       Behaviors.same
 
-    case MortalityNotice(from) =>
-      ctx.log.info(s"CRDTActor-$id: Received mortality notice that ${from.path.name} has stopped responding")
+    case MortalityNotice(actor) =>
+      ctx.log.info(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
       Behaviors.same
 
   Behaviors.same
