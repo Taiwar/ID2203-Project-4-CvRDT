@@ -27,7 +27,7 @@ object ActorFailureDetector {
   // Key-Value Ops
 
   // Timer
-  private case object Timeout extends Command
+  case class Timeout() extends Command
   private case object TimerKey
 
   // Heartbeat
@@ -43,6 +43,7 @@ object ActorFailureDetector {
   // Timeout interval (Delta δ)
   val delta = 50.millis
 
+  // TODO: Check if this is needed
   // Total wait time (time T)
   val T = gamma + delta
 
@@ -60,7 +61,6 @@ class ActorFailureDetector(
                    id: Int,
                    ctx: ActorContext[Command],
                    timers: TimerScheduler[Command]
-                   //faiureDetector: ActorRef[ActorFailureDetector.Command]
                  ) extends AbstractBehavior[Command](ctx) {
 
   // The CRDT state of this actor, mutable var as LWWMap is immutable
@@ -87,7 +87,7 @@ class ActorFailureDetector(
   // Create timer to handle timeout
   private def startTimeoutTimer(): Unit = {
     // TODO: Check if this is the best way to handle timeout
-    timers.startSingleTimer(TimerKey, Timeout, T)
+    timers.startSingleTimer(TimerKey, Timeout(), delta) // Timeout interval (Delta δ)
   }
 
   private def handleHeartbeatAck() : Unit = {
@@ -111,7 +111,7 @@ class ActorFailureDetector(
       Behaviors.same
 
     // Handle case if no ack is received
-    case Timeout =>
+    case Timeout() =>
       ctx.log.info(s"FailureDetector-$id: Timeout")
       // Inform others about the timeout (death) of agent
       // TODO: Replace detect with suspect and request ack from every other process
@@ -125,7 +125,7 @@ class ActorFailureDetector(
     case Heartbeat() =>
       ctx.log.info(s"FailureDetector-$id: Sending heartbeat")
       // Send the heartbeat message to the sender
-      messageSender.get ! CRDTActorV2.Heartbeat(ctx.self)
+      messageSender.get ! CRDTActorV2.Heartbeat(ctx.self, false)
       // Start timeout timer
       startTimeoutTimer()
       Behaviors.same
