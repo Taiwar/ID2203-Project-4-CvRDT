@@ -37,6 +37,12 @@ object CRDTActorV3 {
   case class AtomicResponse(responses: Iterable[(String, Command)])
       extends Indication
 
+  // Error responses
+
+  case class UnknownCommandResponse() extends Indication
+
+  case class NoLeaderResponse() extends Indication
+
   // Internal messages
 
   // Internal forwarding of atomic messages
@@ -169,6 +175,7 @@ class CRDTActorV3(
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing PUT $key -> $value")
+      // TODO: Could we use a logical clock and avoid the need for synchronized clocks?
       crdtstate = crdtstate.put(selfNode, key, value)
       dirty = true
       ctx.log.debug(s"CRDTActor-$id: CRDT state: $crdtstate")
@@ -217,6 +224,7 @@ class CRDTActorV3(
         case None => ()
 
       // If we got all responses, commit
+      // TODO: See if a majority would also suffice
       if (pendingTransactionAgreement(timestamp) == others.size) {
         ctx.log.info(
           s"CRDTActor-$id: All locks acquired for transaction $timestamp"
@@ -233,9 +241,8 @@ class CRDTActorV3(
           case Get(key, _) =>
             (key, GetResponse(key, crdtstate.get(key).getOrElse(0)))
           case _ =>
-            throw new Exception(
-              "Unexpected command"
-            ) // TODO: Handle this better instead of crashing
+            ctx.log.warn(s"CRDTActor-$id: Unknown command")
+            ("unknown", UnknownCommandResponse())
         }
 
         // Remove transaction from pending
@@ -278,8 +285,8 @@ class CRDTActorV3(
         case Some(l) =>
           l ! ForwardAtomic(from, commands, ctx.self)
         case None =>
-          // TODO: Respond with error
           ctx.log.warn(s"CRDTActor-$id: No leader")
+          from ! NoLeaderResponse()
       Behaviors.same
 
     case ForwardAtomic(origin, commands, from) =>
