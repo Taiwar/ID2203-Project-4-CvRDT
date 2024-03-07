@@ -29,8 +29,8 @@ object ActorFailureDetector {
 
   // Key-Value Ops
 
-  // Timer
-  case class Timeout() extends Command
+  // Timeout
+  case class Timeout(actorId: Int) extends Command
   private case object TimerKey
 
   // Heartbeat
@@ -104,14 +104,14 @@ class ActorFailureDetector(
   }
 
   // Start the failure detector timer (timeout)
-  private def startTimeoutTimer(id: Int): Unit = {
+  private def startTimeoutTimer(actorId: Int): Unit = {
     // Start the failure detector timer (heartbeat) with a random delay
     val variance = 10.millis + Random.nextInt((epsilon.toMillis.toInt - 10) + 1).millis
     val timoutTime = T + variance
 
     timers.startTimerWithFixedDelay(
-      id, // Use the provided id or default to the actor's id
-      ActorFailureDetector.Timeout(),
+      actorId, // Use the provided id or default to the actor's id
+      ActorFailureDetector.Timeout(actorId),
       timoutTime // Time between heartbeats interval (Gamma γ)
     )
   }
@@ -120,14 +120,6 @@ class ActorFailureDetector(
   private def stopTimer(id: Int): Unit = {
     timers.cancel(id)
   }
-
-  // Create timer to handle timeout
-  private def startTimeoutTimer(): Unit = {
-    processTimeout = true
-    // TODO: Check if this is the best way to handle timeout
-    timers.startSingleTimer(TimerKey, Timeout(), T) // Timeout interval (time T)
-  }
-
   private def handleHeartbeatAck() : Unit = {
     processTimeout = false
     // TODO: Check if timers.cancel & restart is needed
@@ -142,82 +134,80 @@ class ActorFailureDetector(
     case Start(from) =>
       ctx.log.info(s"FailureDetector-$id started")
 
+      // Start the failure detector timer
+      startFailureDetectorTimer()
+
       // Store the sender of the start message
       messageSender = Some(from)
 
       // Setup ids for all actors
-      for (actor <- others.values) {
-        // Cast the actor to CRDTActorV2 and send MortalityNotice
-        actor match {
-          case actor: ActorRef[CRDTActorV2.Command] =>
-            actor ! CRDTActorV2.GetId(ctx.self)
-          case _ =>
-          // Skip the actor if it is not of type CRDTActorV2
-        }
-      }
+      for ((actorId, actor) <- others) {
+        // Add actor to the aliveActors map
+        aliveActors += (actorId -> true)
 
-      // Start the failure detector timer
-      startFailureDetectorTimer()
+        // Start the timeout timer for each actor
+        startTimeoutTimer(actorId)
+      }
       Behaviors.same
 
-    case GetIdResponse(id) =>
+    case GetIdResponse(actorId) =>
       ctx.log.info(s"FailureDetector-$id: Received idResponse")
 
-      startTimeoutTimer(id)
+      startTimeoutTimer(actorId)
 
       // Add the actor to the aliveActors map
       aliveActors += (id -> true)
       Behaviors.same
 
-    // Handle case if no ack is received
-    case Timeout() if processTimeout =>
+    case Timeout(actorId: Int) =>
       ctx.log.info(s"FailureDetector-$id: Timeout")
-      // Inform others about the timeout (death) of agent
-      // TODO: Replace detect with suspect and request ack from every other process
-      // TODO: Check if wrapper is needed
-      messageSender match {
-        case Some(sender) =>
-          for (actor <- others.values) {
-            // Cast the actor to CRDTActorV2 and send MortalityNotice
-            actor match {
-              case actor: ActorRef[CRDTActorV2.Command] =>
-                actor ! CRDTActorV2.MortalityNotice(sender)
+      // Set aliveActors to false
+      aliveActors += (actorId -> false)
+
+      // Stop the timer
+      stopTimer(actorId)
+
+      // TODO: Notify the application that the actor is dead
+
+      // Send the MortalityNotice to all other actors
+      for (actorId <- aliveActors.keys) {
+          if (aliveActors(actorId)) {
+            // Get the actor from the 'others' map
+            others.get(actorId) match {
+              case Some(actor: ActorRef[CRDTActorV2.Command]) =>
+                // Send Heartbeat to the actor
+                actor ! CRDTActorV2.MortalityNotice(actor)
               case _ =>
-                // Skip the actor if it is not of type CRDTActorV2
+              // Skip the actor if it is not found or not of the correct type
             }
           }
-        case None =>
-        // Skip if messageSender is not set
       }
-      Behaviors.same
-
-    case Timeout() =>
-      // Ignore the Timeout message if processTimeout is false
       Behaviors.same
 
     // Heartbeat handling
     case Heartbeat() =>
       ctx.log.info(s"FailureDetector-$id: Sending heartbeat")
       // Send the heartbeat to all other actors
-      for (actor <- others.values) {
-        // Cast the actor to CRDTActorV2 and send Heartbeat
-        actor match {
-          case actor: ActorRef[CRDTActorV2.Command] =>
-            actor ! CRDTActorV2.Heartbeat(ctx.self, true)
+      for (actorId <- aliveActors.keys) {
+        // Get the actor from the 'others' map
+        others.get(actorId) match {
+          case Some(actor: ActorRef[CRDTActorV2.Command]) =>
+            // Send Heartbeat to the actor
+            actor ! CRDTActorV2.Heartbeat(ctx.self, false)
           case _ =>
-            // Skip the actor if it is not of type CRDTActorV2
+          // Skip the actor if it is not found or not of the correct type
         }
       }
-//      messageSender.get ! CRDTActorV2.Heartbeat(ctx.self, false)
-      // Start timeout timer
-      startTimeoutTimer()
       Behaviors.same
 
     // Handle HeartbeatAck from CRDTActorV2
     case HeartbeatAck(from) =>
       ctx.log.info(s"FailureDetector-$id: Received heartbeat ack")
-      // Start timemout timer again
-      startTimeoutTimer()
+      // Filter the actor from the others
+      val (actorId, actor) = others.filter(_._2 == from).head
+
+      // Restart timemout timer
+      startTimeoutTimer(actorId)
       Behaviors.same
 
     case MortalityNotice(from) =>
