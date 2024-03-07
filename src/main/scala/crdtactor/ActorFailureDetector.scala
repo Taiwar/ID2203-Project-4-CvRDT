@@ -1,7 +1,6 @@
 package crdtactor
 
 import ActorFailureDetector.Command
-import crdtactor.CRDTActorV2.MortalityNotice
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.cluster.ddata
@@ -22,7 +21,7 @@ object ActorFailureDetector {
   case class MortalityNotice(from: ActorRef[CRDTActorV2.Command]) extends Command
 
   // New message type to hold a MortalityNotice from CRDTActorV2
-  case class MortalityNoticeWrapper(mortalityNotice: CRDTActorV2.MortalityNotice) extends Command
+//  case class MortalityNoticeWrapper(mortalityNotice: CRDTActorV2.MortalityNotice) extends Command
 
   // Key-Value Ops
 
@@ -41,7 +40,7 @@ object ActorFailureDetector {
   val gamma = 500.millis
 
   // Timeout interval (Delta δ)
-  val delta = 50.millis
+  val delta = 10000.millis
 
   // TODO: Check if this is needed
   // Total wait time (time T)
@@ -49,6 +48,9 @@ object ActorFailureDetector {
 
   // The sender of the start message (actor reference)
   var messageSender: Option[ActorRef[CRDTActorV2.Command]] = None
+
+  // Add a flag to indicate whether the Timeout message should be processed
+  private var processTimeout = true
 }
 
 import crdtactor.ActorFailureDetector.*
@@ -79,18 +81,20 @@ class ActorFailureDetector(
     // Start the failure detector timer
     timers.startTimerWithFixedDelay(
       TimerKey,
-      Heartbeat(),
+      ActorFailureDetector.Heartbeat(),
       gamma // Time between heartbeats interval (Gamma γ)
     )
   }
 
   // Create timer to handle timeout
   private def startTimeoutTimer(): Unit = {
+    processTimeout = true
     // TODO: Check if this is the best way to handle timeout
-    timers.startSingleTimer(TimerKey, Timeout(), delta) // Timeout interval (Delta δ)
+    timers.startSingleTimer(TimerKey, Timeout(), T) // Timeout interval (time T)
   }
 
   private def handleHeartbeatAck() : Unit = {
+    processTimeout = false
     // TODO: Check if timers.cancel & restart is needed
     timers.cancel(TimerKey)
     startFailureDetectorTimer() // Reset the timer
@@ -111,14 +115,29 @@ class ActorFailureDetector(
       Behaviors.same
 
     // Handle case if no ack is received
-    case Timeout() =>
+    case Timeout() if processTimeout =>
       ctx.log.info(s"FailureDetector-$id: Timeout")
       // Inform others about the timeout (death) of agent
       // TODO: Replace detect with suspect and request ack from every other process
       // TODO: Check if wrapper is needed
-      for (actor <- others.values) {
-        actor ! MortalityNoticeWrapper(CRDTActorV2.MortalityNotice(messageSender.get))
+      messageSender match {
+        case Some(sender) =>
+          for (actor <- others.values) {
+            // Cast the actor to CRDTActorV2 and send MortalityNotice
+            actor match {
+              case actor: ActorRef[CRDTActorV2.Command] =>
+                actor ! CRDTActorV2.MortalityNotice(sender)
+              case _ =>
+                // Skip the actor if it is not of type CRDTActorV2
+            }
+          }
+        case None =>
+        // Skip if messageSender is not set
       }
+      Behaviors.same
+
+    case Timeout() =>
+      // Ignore the Timeout message if processTimeout is false
       Behaviors.same
 
     // Heartbeat handling
@@ -134,6 +153,11 @@ class ActorFailureDetector(
       ctx.log.info(s"FailureDetector-$id: Received heartbeat ack")
       // Handle ack from the sender
       handleHeartbeatAck()
+      Behaviors.same
+
+    case MortalityNotice(from) =>
+      ctx.log.info(s"FailureDetector-$id: Received MortalityNotice")
+      // Handle MortalityNotice from CRDTActorV2
       Behaviors.same
 
   Behaviors.same
