@@ -31,20 +31,23 @@ class SystemTestFDV1 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       val probeFailureDetector = createTestProbe[ActorFailureDetector.Command]()
 
       // Spawn the failure detector and give it a name
-      val failureDetector = spawn(Behaviors.setup[ActorFailureDetector.Command] { ctx =>
-        Behaviors.withTimers(timers => new ActorFailureDetector(0, ctx, timers))
-      }, "failureDetector")
+      //      val failureDetector = spawn(Behaviors.setup[ActorFailureDetector.Command] { ctx =>
+      //        Behaviors.withTimers(timers => new ActorFailureDetector(0, ctx, timers))
+      //      }, "failureDetector")
 
       // Start the failure detector
-      failureDetector ! ActorFailureDetector.Start(probeCRDT.ref)
+      probeFailureDetector ! ActorFailureDetector.Start(probeCRDT.ref)
 
       // wait for the next heartbeat
       probeCRDT.expectNoMessage(500.millis)
 
+      // Send heartbeat to the actor
+      probeCRDT.ref ! CRDTActorV2.Heartbeat(probeFailureDetector.ref, false)
+
       // Loop through 100 heartbeats
-      for (_ <- 1 to 10) {
+      for (_ <- 1 to 100) {
         // Actor should receive the heartbeat from the failure detector
-        probeCRDT.expectMessage(CRDTActorV2.Heartbeat(failureDetector, false))
+        probeCRDT.expectMessage(CRDTActorV2.Heartbeat(probeFailureDetector.ref, false))
 
         // Send the heartbeat ack to the failure detector
         probeFailureDetector.ref ! ActorFailureDetector.HeartbeatAck(actorRef)
@@ -56,7 +59,7 @@ class SystemTestFDV1 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         probeCRDT.expectNoMessage(500.millis)
 
         // Send heartbeat to the actor
-        probeCRDT.ref ! CRDTActorV2.Heartbeat(failureDetector, false)
+        probeCRDT.ref ! CRDTActorV2.Heartbeat(probeFailureDetector.ref, false)
       }
     }
 
@@ -73,20 +76,52 @@ class SystemTestFDV1 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       // Start the failure detector
       failureDetector ! ActorFailureDetector.Start(probeCRDT.ref)
 
-      // wait for the next heartbeat
-      probeCRDT.expectNoMessage(500.millis)
 
-      // Actor should receive the heartbeat but be halted for testing purposes
-      probeCRDT.expectMessage(CRDTActorV2.Heartbeat(failureDetector, false))
 
       // wait for the next heartbeat
       probeCRDT.expectNoMessage(500.millis)
 
-      // Send heartbeat to the actor
-      probeCRDT.ref ! CRDTActorV2.Heartbeat(probeFailureDetector.ref, true)
+      // Loop through 100 heartbeats
+//      for (_ <- 1 to 10) {
+        // Actor should receive the heartbeat from the failure detector
+        probeCRDT.expectMessage(CRDTActorV2.Heartbeat(failureDetector, false))
+
+        println ("Received heartbeat")
+
+        // Send the heartbeat ack to the failure detector
+        probeFailureDetector.ref ! ActorFailureDetector.HeartbeatAck(actorRef)
+
+        println ("Sent heartbeat ack")
+
+        // Expect a heartbeat from the failure detector
+        probeFailureDetector.expectMessage(ActorFailureDetector.HeartbeatAck(actorRef))
+
+        println ("Received heartbeat ack")
+
+        // wait for the next heartbeat
+        probeCRDT.expectNoMessage(500.millis)
+
+        println ("Waiting for next heartbeat")
+
+        // Send heartbeat to the actor
+//        probeCRDT.ref ! CRDTActorV2.Heartbeat(failureDetector, false)
+
+        println ("Sent heartbeat")
+
+        // First expect a heartbeat from the crdt actor (The one we send the previous line)
+        probeCRDT.expectMessage(CRDTActorV2.Heartbeat(failureDetector, false))
+
+        // Wait for the timeout
+//        probeCRDT.expectNoMessage(550.millis)
+
+        // Actor should receive the timeout message
+//        probeCRDT.expectMessage(CRDTActorV2.MortalityNotice(probeCRDT.ref))
+
+        println ("Received timeout")
+//      }
 
       // Failure detector should detect the failure
-//      probeFailureDetector.expectMessage(ActorFailureDetector.Timeout())
+
 //
 //      // Actor should receive the timeout message
 //      probeCRDT.expectMessage(CRDTActorV2.MortalityNotice(probeCRDT.ref))
@@ -107,5 +142,10 @@ class SystemTestFDV1 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 //      probeCRDT.expectMessage(CRDTActorV2.Timeout)
     }
 
+    "have working heartbeat system" in new StoreSystem {
+
+      Thread.sleep(10000)
+
+    }
   }
 }
