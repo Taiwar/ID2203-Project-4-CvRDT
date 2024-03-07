@@ -1,10 +1,12 @@
 package crdtactor
 
+import CRDTActorV2.Command
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.cluster.ddata
 import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
 import crdtactor.ActorFailureDetector
+
 import scala.concurrent.duration.DurationInt
 import scala.util.Random
 
@@ -49,6 +51,9 @@ object CRDTActorV2 {
     extends Command
 
   case class MortalityNotice(actor: ActorRef[Command]) extends Command
+
+  // New message type to hold a MortalityNoticeWrapper from ActorFailureDetector
+//  case class MortalityNoticeWrapper(mortalityNotice: ActorFailureDetector.MortalityNoticeWrapper) extends Command
 
   // Timer
   private case object Timeout extends Command
@@ -100,7 +105,7 @@ class CRDTActorV2(
   val r = scala.util.Random
 
   // Failure detector
-  private var failureDetector: ActorRef[crdtactor.ActorFailureDetector.Command] = _
+  var failureDetector: ActorRef[ActorFailureDetector.Command] = _
 
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
@@ -132,8 +137,13 @@ class CRDTActorV2(
     case Start() =>
       ctx.log.info(s"CRDTActor-$id started")
 
+      // Spawn the failure detector and give it a name
+      failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetector.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorFailureDetector(id, ctx, timers))
+      }, s"failure-detector-$id")
+
       // Start the failure detector
-      //  failureDetector ! ActorFailureDetector.Start(ctx.self)
+      failureDetector ! ActorFailureDetector.Start(ctx.self)
       Behaviors.same
 
     case Put(key, value, from) =>
@@ -279,8 +289,10 @@ class CRDTActorV2(
       ctx.log.info(s"CRDTActor-$id: Received heartbeat")
 
       if (delay) {
+        ctx.log.info(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
         ctx.scheduleOnce(600.millis, ctx.self, Heartbeat(from, false))
       } else {
+        ctx.log.info(s"CRDTActor-$id: Sending heartbeat ack to ${from.path.name}")
         // Send ack back to the sender
         from ! ActorFailureDetector.HeartbeatAck(ctx.self)
       }
