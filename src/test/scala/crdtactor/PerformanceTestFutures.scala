@@ -178,6 +178,16 @@ class PerformanceTestFutures
 
       println(s"Total unmatched requests (should be 0): $noMatch")
 
+      // Output putResponseTimesDiffs and getResponseTimesDiffs to a CSV
+      val putResponseTimesDiffsCSV = putResponseTimesDiffs.mkString(",")
+      val getResponseTimesDiffsCSV = getResponseTimesDiffs.mkString(",")
+      val csv = s"$putResponseTimesDiffsCSV\n$getResponseTimesDiffsCSV"
+      val filename = "performance_test.csv"
+      val file = new java.io.File(filename)
+      val bw = new java.io.BufferedWriter(new java.io.FileWriter(file))
+      bw.write(csv)
+      bw.close()
+
     }
 
   }
