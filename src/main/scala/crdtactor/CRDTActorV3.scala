@@ -170,11 +170,13 @@ class CRDTActorV3(
     case Leader(l) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
       leader = Some(l)
+      // TODO: handle getting a new leader, we need to abort ongoing transactions and drop locks
       Behaviors.same
 
     case Timeout =>
       // Send deltas if dirty
       if (!dirty) return Behaviors.same
+      // TODO: Don't send deltas if we're currently executing a transaction
       broadcastAndResetDeltas()
       Behaviors.same
 
@@ -325,6 +327,7 @@ class CRDTActorV3(
         case Some(l) =>
           l ! ForwardAtomic(from, commands, ctx.self)
         case None =>
+          // TODO: This can also happen if a leader failed
           ctx.log.warn(s"CRDTActor-$id: No leader")
           from ! NoLeaderResponse()
       Behaviors.same
