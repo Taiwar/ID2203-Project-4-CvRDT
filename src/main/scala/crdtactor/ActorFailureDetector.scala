@@ -7,6 +7,7 @@ import org.apache.pekko.cluster.ddata
 import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
 
 import scala.concurrent.duration.DurationInt
+import scala.util.Random
 
 object ActorFailureDetector {
   // The type of messages that the actor can handle
@@ -19,6 +20,9 @@ object ActorFailureDetector {
 
   // Mortality Notice
   case class MortalityNotice(from: ActorRef[CRDTActorV2.Command]) extends Command
+
+  // GetIdResponse
+  case class GetIdResponse(id: Int) extends Command
 
   // New message type to hold a MortalityNotice from CRDTActorV2
 //  case class MortalityNoticeWrapper(mortalityNotice: CRDTActorV2.MortalityNotice) extends Command
@@ -37,10 +41,13 @@ object ActorFailureDetector {
   // Time
 
   // Time between heartbeats interval (Gamma γ)
-  val gamma = 500.millis
+  val gamma = 1000.millis
 
   // Timeout interval (Delta δ)
-  val delta = 10000.millis
+  val delta = 500.millis
+
+  // Random time difference between nodes (Epsilon ε)
+  val epsilon = 100.millis
 
   // TODO: Check if this is needed
   // Total wait time (time T)
@@ -76,14 +83,42 @@ class ActorFailureDetector(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
-  // Start the failure detector timer
+  // Map with all the timerSchedules for the actors
+  // TODO: See if you need to remove it
+//  var actorTimers: Map[Int, TimerScheduler[Command]] = Map()
+
+  // A map with all the other actors and a boolean if they are alive
+  private val aliveActors = scala.collection.mutable.Map[Int, Boolean]()
+
+  // Start the failure detector timer (heartbeat)
   private def startFailureDetectorTimer(): Unit = {
-    // Start the failure detector timer
+    // Start the failure detector timer (heartbeat) with a random delay
+    val variance = 10.millis + Random.nextInt((epsilon.toMillis.toInt - 10) + 1).millis
+    val heartbeatTime = gamma + variance
+
     timers.startTimerWithFixedDelay(
-      TimerKey,
+      id, // Use the provided id or default to the actor's id
       ActorFailureDetector.Heartbeat(),
-      gamma // Time between heartbeats interval (Gamma γ)
+      heartbeatTime // Time between heartbeats interval (Gamma γ)
     )
+  }
+
+  // Start the failure detector timer (timeout)
+  private def startTimeoutTimer(id: Int): Unit = {
+    // Start the failure detector timer (heartbeat) with a random delay
+    val variance = 10.millis + Random.nextInt((epsilon.toMillis.toInt - 10) + 1).millis
+    val timoutTime = T + variance
+
+    timers.startTimerWithFixedDelay(
+      id, // Use the provided id or default to the actor's id
+      ActorFailureDetector.Timeout(),
+      timoutTime // Time between heartbeats interval (Gamma γ)
+    )
+  }
+
+  // Stop the timer
+  private def stopTimer(id: Int): Unit = {
+    timers.cancel(id)
   }
 
   // Create timer to handle timeout
@@ -110,8 +145,28 @@ class ActorFailureDetector(
       // Store the sender of the start message
       messageSender = Some(from)
 
+      // Setup ids for all actors
+      for (actor <- others.values) {
+        // Cast the actor to CRDTActorV2 and send MortalityNotice
+        actor match {
+          case actor: ActorRef[CRDTActorV2.Command] =>
+            actor ! CRDTActorV2.GetId(ctx.self)
+          case _ =>
+          // Skip the actor if it is not of type CRDTActorV2
+        }
+      }
+
       // Start the failure detector timer
       startFailureDetectorTimer()
+      Behaviors.same
+
+    case GetIdResponse(id) =>
+      ctx.log.info(s"FailureDetector-$id: Received idResponse")
+
+      startTimeoutTimer(id)
+
+      // Add the actor to the aliveActors map
+      aliveActors += (id -> true)
       Behaviors.same
 
     // Handle case if no ack is received
@@ -143,16 +198,26 @@ class ActorFailureDetector(
     // Heartbeat handling
     case Heartbeat() =>
       ctx.log.info(s"FailureDetector-$id: Sending heartbeat")
-      // Send the heartbeat message to the sender
-      messageSender.get ! CRDTActorV2.Heartbeat(ctx.self, false)
+      // Send the heartbeat to all other actors
+      for (actor <- others.values) {
+        // Cast the actor to CRDTActorV2 and send Heartbeat
+        actor match {
+          case actor: ActorRef[CRDTActorV2.Command] =>
+            actor ! CRDTActorV2.Heartbeat(ctx.self, true)
+          case _ =>
+            // Skip the actor if it is not of type CRDTActorV2
+        }
+      }
+//      messageSender.get ! CRDTActorV2.Heartbeat(ctx.self, false)
       // Start timeout timer
       startTimeoutTimer()
       Behaviors.same
 
+    // Handle HeartbeatAck from CRDTActorV2
     case HeartbeatAck(from) =>
       ctx.log.info(s"FailureDetector-$id: Received heartbeat ack")
-      // Handle ack from the sender
-      handleHeartbeatAck()
+      // Start timemout timer again
+      startTimeoutTimer()
       Behaviors.same
 
     case MortalityNotice(from) =>
