@@ -31,13 +31,13 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     actors.foreach((_, actorRef) => actorRef ! CRDTActorV3.Leader(actors(0)))
 
     Thread.sleep(50) // Wait for actors to be ready
+
+    val probe: TestProbe[Command] = createTestProbe[Command]()
   }
 
   "The system" must {
 
     "have eventually consistent state after CRDT actions (basic)" in new StoreSystem {
-      val probe = createTestProbe[Command]()
-
       // Create randomized key value tuples
       val keyValues =
         (0 until N_ACTORS).map(_ => (Utils.randomString(), Utils.randomInt()))
@@ -72,8 +72,6 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     }
 
     "not guarantee sequentially consistent state after non-atomic actions (sanity check)" in new StoreSystem {
-      val probe = createTestProbe[Command]()
-
       // Simulate a bank transfer
 
       // Set up
@@ -89,9 +87,9 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       actors(0) ! Get("b", probe.ref)
       val b = probe.receiveMessage().asInstanceOf[GetResponse].value
       // Actor 0 deducts 50 from b
-      actors(0) ! Put("b", b - 50, probe.ref)
+      actors(0) ! Put("b", b.get - 50, probe.ref)
       // Actor 0 adds 50 to a
-      actors(0) ! Put("a", a + 50, probe.ref)
+      actors(0) ! Put("a", a.get + 50, probe.ref)
       probe.receiveMessage()
       probe.receiveMessage()
       Thread.sleep(
@@ -106,7 +104,7 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       // Log the values
       println(
-        s"Intended from actor 0: a: ${a + 50} b: ${b - 50}; Received at actor 1: a1: $a1, b1: $b1"
+        s"Intended from actor 0: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 1: a1: $a1, b1: $b1"
       )
 
       // a1 should be 150 and b1 should be 50 if the state was sequentially consistent
@@ -115,8 +113,6 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     }
 
     "have sequentially consistent state after atomic actions" in new StoreSystem {
-      val probe = createTestProbe[Command]()
-
       // Simulate a bank transfer
 
       // Set up
@@ -138,7 +134,7 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       val b = results.find(_._1 == "b").get._2.asInstanceOf[GetResponse].value
       // Actor 0 deducts 50 from b and adds 50 to a
       actors(0) ! Atomic(
-        Array(Put("b", b - 50, probe.ref), Put("a", a + 50, probe.ref)),
+        Array(Put("b", b.get - 50, probe.ref), Put("a", a.get + 50, probe.ref)),
         probe.ref
       )
       probe.receiveMessage() match {
@@ -156,11 +152,11 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       // Log the values
       println(
-        s"Intended from actor 0: a: ${a + 50} b: ${b - 50}; Received at actor 1: a1: $a1, b1: $b1"
+        s"Intended from actor 0: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 1: a1: $a1, b1: $b1"
       )
 
       // Either a1 and b1 are both 150 or both are not 150
-      (a1 == 150 && b1 == 150) || (a1 != 150 && b1 != 150) shouldEqual true
+      (a1.get == 150 && b1.get == 150) || (a1.get != 150 && b1.get != 150) shouldEqual true
 
       Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
       // Eventually, actor 2 reads new values of a and b
@@ -171,16 +167,14 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       // Log the values
       println(
-        s"Intended from actor 0: a: ${a + 50} b: ${b - 50}; Received at actor 2: a2: $a2, b2: $b2"
+        s"Intended from actor 0: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 2: a2: $a2, b2: $b2"
       )
 
       // Either a1 and b1 are both 150 or both are not 150
-      (a2 == 150 && b2 == 150) shouldEqual true
+      (a2.get == 150 && b2.get == 150) shouldEqual true
     }
 
     "have sequentially consistent state after concurrent atomic actions" in new StoreSystem {
-      Utils.setLoggerLevel("INFO")
-      val probe: TestProbe[Command] = createTestProbe[Command]()
       // Setup key a to be 0
       actors(0) ! Put("a", 0, probe.ref)
       // Wait for sync
@@ -231,5 +225,141 @@ class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       // a should be 2
       a shouldEqual 2
     }
+
+    "should execute updates inconsistently if not executed in atomic batch" in new StoreSystem {
+      // Setup key a to be max
+      val max = 5
+      actors(0) ! Put("a", max, probe.ref)
+      actors(0) ! Put("b", max, probe.ref)
+      // Wait for sync
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      val decrementA =
+        UpdateWithContext(
+          "a",
+          "b",
+          (a, b) => if (a.get > 0 || b.get > 0) a.get - 1 else a.get,
+          probe.ref
+        )
+      val decrementB =
+        UpdateWithContext(
+          "b",
+          "a",
+          (b, a) => if (a.get > 0 || b.get > 0) b.get - 1 else b.get,
+          probe.ref
+        )
+
+      // Randomly send increments and decrements to actors
+      val updateThread = new Thread(() => {
+        val start = System.currentTimeMillis()
+        while (
+          System
+            .currentTimeMillis() - start < Utils.CRDT_SYNC_PERIOD * max * 1.2
+        ) {
+          val actorRef = actors(Random.between(0, N_ACTORS))
+          // Simulate decrements arriving at different times
+          actorRef ! decrementA
+          Thread.sleep(Utils.CRDT_SYNC_PERIOD)
+          actorRef ! decrementB
+          Thread.sleep(5)
+        }
+      })
+      // Start update thread
+      updateThread.start()
+
+      // When reading, a should always be between 0 and 10
+      val start = System.currentTimeMillis()
+      val receiveProbe = createTestProbe[Command]()
+      var inconsistent = false
+      while (
+        System.currentTimeMillis() - start < Utils.CRDT_SYNC_PERIOD * max * 1.2
+      ) {
+        val actorRef = actors(Random.between(0, N_ACTORS))
+        actorRef ! Get("a", receiveProbe.ref)
+        // Check if response is GetResponse and get value
+        receiveProbe.receiveMessage() match {
+          case GetResponse(key, a) =>
+            actorRef ! Get("b", receiveProbe.ref)
+            val b =
+              receiveProbe.receiveMessage().asInstanceOf[GetResponse].value
+
+            println(s"Read values: a: ${a.get}, b: ${b.get}")
+            // set inconsistent to true if a or be are lower than 0
+            if (a.get < 0 || b.get < 0) inconsistent = true
+          case msg => ()
+        }
+        Thread.sleep(25)
+      }
+      // a and b should be inconsistent at some point
+      inconsistent shouldEqual true
+    }
+
+    "should execute updates consistently if executed in atomic batch" in new StoreSystem {
+      // Setup key a to be max
+      val max = 5
+      actors(0) ! Put("a", max, probe.ref)
+      actors(0) ! Put("b", max, probe.ref)
+      // Wait for sync
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      val decrementA =
+        UpdateWithContext(
+          "a",
+          "b",
+          (a, b) => if (a.get > 0 || b.get > 0) a.get - 1 else a.get,
+          probe.ref
+        )
+      val decrementB =
+        UpdateWithContext(
+          "b",
+          "a",
+          (b, a) => if (a.get > 0 || b.get > 0) b.get - 1 else b.get,
+          probe.ref
+        )
+
+      // Randomly send increments and decrements to actors
+      val updateThread = new Thread(() => {
+        val start = System.currentTimeMillis()
+        while (
+          System
+            .currentTimeMillis() - start < Utils.CRDT_SYNC_PERIOD * max * 1.2
+        ) {
+          val actorRef = actors(Random.between(0, N_ACTORS))
+          // Send both decrements in atomic
+          actorRef ! Atomic(
+            Array(decrementA, decrementB),
+            probe.ref
+          )
+          Thread.sleep(25)
+        }
+      })
+      // Start update thread
+      updateThread.start()
+
+      // When reading, a should always be between 0 and 10
+      val start = System.currentTimeMillis()
+      val receiveProbe = createTestProbe[Command]()
+      while (
+        System.currentTimeMillis() - start < Utils.CRDT_SYNC_PERIOD * max * 1.2
+      ) {
+        val actorRef = actors(Random.between(0, N_ACTORS))
+        actorRef ! Get("a", receiveProbe.ref)
+        // Check if response is GetResponse and get value
+        receiveProbe.receiveMessage() match {
+          case GetResponse(key, a) =>
+            actorRef ! Get("b", receiveProbe.ref)
+            val b =
+              receiveProbe.receiveMessage().asInstanceOf[GetResponse].value
+
+            println(s"Read values: a: ${a.get}, b: ${b.get}")
+            // b and a should always be greater than 0
+            a.get should (be >= 0 and be <= max)
+            b.get should (be >= 0 and be <= max)
+          case msg => ()
+        }
+        Thread.sleep(25)
+      }
+    }
+
   }
 }

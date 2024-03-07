@@ -29,13 +29,28 @@ object CRDTActorV3 {
 
   case class Get(key: String, from: ActorRef[Command]) extends Request
 
-  case class GetResponse(key: String, value: Int) extends Indication
+  case class GetResponse(key: String, value: Option[Int]) extends Indication
+
+  case class UpdateWithContext(
+      key: String,
+      contextKey: String,
+      update: (Option[Int], Option[Int]) => Int,
+      from: ActorRef[Command]
+  ) extends Request
+
+  case class UpdateWithContextResponse(key: String) extends Indication
 
   case class Atomic(commands: Iterable[Command], from: ActorRef[Command])
       extends Request
 
   case class AtomicResponse(responses: Iterable[(String, Command)])
       extends Indication
+
+  // Error responses
+
+  case class UnknownCommandResponse() extends Indication
+
+  case class NoLeaderResponse() extends Indication
 
   // Internal messages
 
@@ -113,6 +128,7 @@ class CRDTActorV3(
     scala.collection.mutable.Map[(Int, Int), ForwardAtomic]()
   // TODO: Remove locks if leader dies
   private val locks = scala.collection.mutable.Map[String, Int]()
+  // TODO: Maybe we should have separate buffers for regular and atomic commands and execute regular commands first
   private val commandBuffer = scala.collection.mutable.Queue[Command]()
 
   private var dirty = false
@@ -169,6 +185,7 @@ class CRDTActorV3(
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing PUT $key -> $value")
+      // TODO: Could we use a logical clock and avoid the need for synchronized clocks?
       crdtstate = crdtstate.put(selfNode, key, value)
       dirty = true
       ctx.log.debug(s"CRDTActor-$id: CRDT state: $crdtstate")
@@ -182,7 +199,25 @@ class CRDTActorV3(
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing GET $key")
-      from ! GetResponse(key, crdtstate.get(key).getOrElse(0))
+      from ! GetResponse(key, crdtstate.get(key))
+      Behaviors.same
+
+    case UpdateWithContext(key, contextKey, update, from) =>
+      // Check lock for key
+      if (locks.getOrElse(key, 0) > 0) {
+        commandBuffer.enqueue(UpdateWithContext(key, contextKey, update, from))
+        return Behaviors.same
+      }
+      ctx.log.debug(s"CRDTActor-$id: Executing UpdateWithContext $key")
+      val current = crdtstate.get(key)
+      val context = crdtstate.get(contextKey)
+      val next = update(current, context)
+      // Put next to store if different
+      if (current.isDefined && current.get != next) {
+        crdtstate = crdtstate.put(selfNode, key, next)
+        dirty = true
+      }
+      from ! UpdateWithContextResponse(key)
       Behaviors.same
 
     case DeltaMsg(from, delta) =>
@@ -203,7 +238,7 @@ class CRDTActorV3(
 
     case PrepareResponse(timestamp, _, delta) =>
       ctx.log.debug(
-        s"CRDTActor-$id: Consuming PrepareResponse operation $timestamp"
+        s"Leader-$id: Consuming PrepareResponse operation $timestamp"
       )
 
       // Increment agreement tracker
@@ -217,9 +252,10 @@ class CRDTActorV3(
         case None => ()
 
       // If we got all responses, commit
+      // TODO: See if a majority would also suffice
       if (pendingTransactionAgreement(timestamp) == others.size) {
         ctx.log.info(
-          s"CRDTActor-$id: All locks acquired for transaction $timestamp"
+          s"Leader-$id: All locks acquired for transaction $timestamp"
         )
         // Get commands from pending transactions
         val tx = pendingTransactions(timestamp)
@@ -231,11 +267,22 @@ class CRDTActorV3(
             dirty = true
             (key, PutResponse(key))
           case Get(key, _) =>
-            (key, GetResponse(key, crdtstate.get(key).getOrElse(0)))
+            (key, GetResponse(key, crdtstate.get(key)))
+          case UpdateWithContext(key, contextKey, update, _) =>
+            val current = crdtstate.get(key)
+            val context = crdtstate.get(contextKey)
+            ctx.log.debug(
+              s"Leader-$id: (Atomic) Executing UpdateWithContext $current with context $context"
+            )
+            val next = update(current, context)
+            if (current.isDefined && current.get != next) {
+              crdtstate = crdtstate.put(selfNode, key, next)
+              dirty = true
+            }
+            (key, UpdateWithContextResponse(key))
           case _ =>
-            throw new Exception(
-              "Unexpected command"
-            ) // TODO: Handle this better instead of crashing
+            ctx.log.warn(s"Leader-$id: Unknown command")
+            ("unknown", UnknownCommandResponse())
         }
 
         // Remove transaction from pending
@@ -264,7 +311,7 @@ class CRDTActorV3(
 
       // Work through and empty buffer
 
-      ctx.log.info(s"CRDTActor-$id: Executing buffered commands")
+      ctx.log.debug(s"CRDTActor-$id: Executing buffered commands")
       while (commandBuffer.nonEmpty) {
         val command = commandBuffer.dequeue()
         ctx.self ! command
@@ -278,8 +325,8 @@ class CRDTActorV3(
         case Some(l) =>
           l ! ForwardAtomic(from, commands, ctx.self)
         case None =>
-          // TODO: Respond with error
           ctx.log.warn(s"CRDTActor-$id: No leader")
+          from ! NoLeaderResponse()
       Behaviors.same
 
     case ForwardAtomic(origin, commands, from) =>
