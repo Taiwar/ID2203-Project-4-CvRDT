@@ -16,3 +16,4 @@ target/
 
 evaluation/data/*
 evaluation/*.png
+!evaluation/*.example.png
