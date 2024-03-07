@@ -15,7 +15,7 @@ class PerformanceTestFutures
     with AnyWordSpecLike {
 
   trait StoreSystem {
-    val N_ACTORS = 4
+    val N_ACTORS = 8
 
     Utils.setLoggerLevel("INFO")
 
@@ -76,7 +76,7 @@ class PerformanceTestFutures
             actorRef ! Get(gId, Utils.randomString(), probes(i).ref)
             getRequestTimes.put(gId, getRequestTime)
             j += 1
-            Thread.sleep(0, 5000) // 0.05 ms
+            // Thread.sleep(0, 5000)
           }
           (putRequestTimes, getRequestTimes)
         }
