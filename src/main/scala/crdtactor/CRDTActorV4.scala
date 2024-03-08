@@ -23,29 +23,37 @@ object CRDTActorV4 {
 
   // Key-Value Ops
   case class Put(opId: String, key: String, value: Int, from: ActorRef[Command])
-    extends Request
+      extends Request
 
   case class PutResponse(opId: String, key: String) extends Indication
 
-  case class Get(opId: String, key: String, from: ActorRef[Command]) extends Request
+  case class Get(opId: String, key: String, from: ActorRef[Command])
+      extends Request
 
-  case class GetResponse(opId: String, key: String, value: Option[Int]) extends Indication
+  case class GetResponse(opId: String, key: String, value: Option[Int])
+      extends Indication
 
   case class UpdateWithContext(
-                                opId: String,
-                                key: String,
-                                contextKey: String,
-                                update: (Option[Int], Option[Int]) => Int,
-                                from: ActorRef[Command]
-                              ) extends Request
+      opId: String,
+      key: String,
+      contextKey: String,
+      update: (Option[Int], Option[Int]) => Int,
+      from: ActorRef[Command]
+  ) extends Request
 
-  case class UpdateWithContextResponse(opId: String, key: String) extends Indication
+  case class UpdateWithContextResponse(opId: String, key: String)
+      extends Indication
 
-  case class Atomic(opId: String, commands: Iterable[Command], from: ActorRef[Command])
-    extends Request
+  case class Atomic(
+      opId: String,
+      commands: Iterable[Command],
+      from: ActorRef[Command]
+  ) extends Request
 
-  case class AtomicResponse(opId: String, responses: Iterable[(String, Command)])
-    extends Indication
+  case class AtomicResponse(
+      opId: String,
+      responses: Iterable[(String, Command)]
+  ) extends Indication
 
   // Error responses
 
@@ -57,34 +65,34 @@ object CRDTActorV4 {
 
   // Internal forwarding of atomic messages
   case class ForwardAtomic(
-                            opId: String,
-                            origin: ActorRef[Command],
-                            commands: Iterable[Command],
-                            from: ActorRef[Command]
-                          ) extends Command
+      opId: String,
+      origin: ActorRef[Command],
+      commands: Iterable[Command],
+      from: ActorRef[Command]
+  ) extends Command
 
   // Periodic delta messages
   private case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
-    extends Command
+      extends Command
 
   // Combines lock gathering and sync
   private case class Prepare(
-                              timestamp: (Int, Int),
-                              keys: Iterable[String],
-                              from: ActorRef[Command]
-                            ) extends Command
+      timestamp: (Int, Int),
+      keys: Iterable[String],
+      from: ActorRef[Command]
+  ) extends Command
 
   // Combines lock gathering and sync
   private case class PrepareResponse(
-                                      timestamp: (Int, Int),
-                                      from: ActorRef[Command],
-                                      delta: Option[ReplicatedDelta]
-                                    ) extends Command
+      timestamp: (Int, Int),
+      from: ActorRef[Command],
+      delta: Option[ReplicatedDelta]
+  ) extends Command
 
   private case class Commit(
-                             timestamp: (Int, Int),
-                             from: ActorRef[Command]
-                           ) extends Command
+      timestamp: (Int, Int),
+      from: ActorRef[Command]
+  ) extends Command
 
   private case object Timeout extends Command
   private case object TimerKey
@@ -97,11 +105,11 @@ import crdtactor.CRDTActorV4.*
 
 // The actor implementation of the CRDT actor that uses a LWWMap CRDT to store the state
 class CRDTActorV4(
-                   // id is the unique identifier of the actor, ctx is the actor context
-                   id: Int,
-                   ctx: ActorContext[Command],
-                   timers: TimerScheduler[CRDTActorV4.Command]
-                 ) extends AbstractBehavior[Command](ctx) {
+    // id is the unique identifier of the actor, ctx is the actor context
+    id: Int,
+    ctx: ActorContext[Command],
+    timers: TimerScheduler[CRDTActorV4.Command]
+) extends AbstractBehavior[Command](ctx) {
 
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
@@ -172,11 +180,13 @@ class CRDTActorV4(
     case Leader(l) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
       leader = Some(l)
+      // TODO: handle getting a new leader, we need to abort ongoing transactions and drop locks
       Behaviors.same
 
     case Timeout =>
       // Send deltas if dirty
       if (!dirty) return Behaviors.same
+      // TODO: Don't send deltas if we're currently executing a transaction
       broadcastAndResetDeltas()
       Behaviors.same
 
@@ -207,7 +217,9 @@ class CRDTActorV4(
     case UpdateWithContext(opId, key, contextKey, update, from) =>
       // Check lock for key
       if (locks.getOrElse(key, 0) > 0) {
-        commandBuffer.enqueue(UpdateWithContext(opId, key, contextKey, update, from))
+        commandBuffer.enqueue(
+          UpdateWithContext(opId, key, contextKey, update, from)
+        )
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing UpdateWithContext $key")
@@ -327,6 +339,7 @@ class CRDTActorV4(
         case Some(l) =>
           l ! ForwardAtomic(opId, from, commands, ctx.self)
         case None =>
+          // TODO: This can also happen if a leader failed
           ctx.log.warn(s"CRDTActor-$id: No leader")
           from ! NoLeaderResponse()
       Behaviors.same
@@ -336,7 +349,7 @@ class CRDTActorV4(
       val keys = commands.flatMap {
         case Put(opId, key, _, _) => Some(key)
         case Get(opId, key, _)    => Some(key)
-        case _              => None
+        case _                    => None
       }
 
       // Check if we already have locks on some keys and queue the transaction if so
