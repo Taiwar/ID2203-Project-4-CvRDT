@@ -175,19 +175,6 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         getResponseTimesDiffs,
         "evaluation/data/basic_get_performance_test.csv"
       )
-
-      // Visualize with smile
-      val labels = Array("put", "get")
-      val data = Array(
-        putResponseTimesDiffs.map(_._3.toDouble).toArray,
-        getResponseTimesDiffs.map(_._3.toDouble).toArray
-      )
-      Utils.saveBoxPlot(
-        data,
-        labels,
-        "response time (ms)",
-        "evaluation/basic_response_times.box.png"
-      )
     }
 
     "basic all atomic ops" in new StoreSystem {
@@ -300,19 +287,6 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       Utils.writeToCsv(
         responseTimesDiffs,
         "evaluation/data/atomic_performance_test.csv"
-      )
-
-      // Visualize with smile
-      val labels = Array("atomic", "atomic")
-      val data = Array(
-        responseTimesDiffs.map(_._3.toDouble).toArray,
-        responseTimesDiffs.map(_._3.toDouble).toArray
-      )
-      Utils.saveBoxPlot(
-        data,
-        labels,
-        "response time (ms)",
-        "evaluation/atomic_response_times.box.png"
       )
     }
 
