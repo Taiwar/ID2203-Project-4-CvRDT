@@ -6,8 +6,7 @@ import org.apache.pekko.cluster.UniqueAddress
 import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.slf4j.{Logger as SLLogger, LoggerFactory as SLLoggerFactory}
 import smile.math.MathEx.median
-import smile.plot.swing.{boxplot, plot}
-import smile.plot.vega.VegaLite
+import smile.plot.swing.boxplot
 
 import java.awt.image.BufferedImage
 import java.io.File
@@ -77,8 +76,8 @@ object Utils {
         ThreadLocalRandom.current.nextLong()
       )
     )
-  def writeToSingleColumnCsv(data: Seq[(Long, Long)], filename: String): Unit =
-    val rows = data.map(x => s"${x._1},${x._2}")
+  def writeToCsv(data: Seq[(String, String, String | Long)], filename: String): Unit =
+    val rows = data.map(x => s"${x._1},${x._2},${x._3}")
     val csv = rows.mkString("\n")
     val file = new java.io.File(filename)
     val bw = new java.io.BufferedWriter(new java.io.FileWriter(file))
@@ -88,32 +87,37 @@ object Utils {
   def calculateResponseTimesDiffs(
       responseTimes: mutable.Map[String, Long],
       requestTimes: mutable.Map[String, Long]
-  ): Seq[(Long, Long)] = {
+  ): Seq[(String, String, Long)] = {
     // Sort by opId
     val responseTimesSorted = responseTimes.toSeq.sortBy(_._2)
     responseTimesSorted.map { case (opId, responseTime) =>
+      // Split opId into actorNr and opNr
+      val (actorNr, opNr) = opId.split(" - ") match
+        case Array(a, b) => (a, b)
+        case _           => ("", "")
       requestTimes.get(opId) match
         case None =>
           println(s"WARNING: No match for op $opId")
           (
-            responseTime,
+            actorNr,
+            opNr,
             0L
           ) // This should not happen, but this hack would create a bias if it did
         case Some(requestTime) =>
-          (requestTime, responseTime - requestTime)
+          (actorNr, opNr, responseTime - requestTime)
     }
   }
 
-  def printStats(label: String, responseDiffs: Seq[(Long, Long)]): Unit = {
+  def printStats(label: String, responseDiffs: Seq[Long]): Unit = {
     val responseDiffsList = responseDiffs.toList
-    val mean = responseDiffsList.map(_._2).sum / responseDiffsList.size
+    val mean = responseDiffsList.sum / responseDiffsList.size.max(1)
     val variance = responseDiffsList
-      .map(x => math.pow(x._2 - mean, 2))
+      .map(x => math.pow(x - mean, 2))
       .sum / responseDiffsList.size
     val stdDev = math.sqrt(variance)
     println(s"$label - Mean: $mean, Variance: $variance, StdDev: $stdDev")
 
-    val med = median(responseDiffs.map(_._2.toDouble).toArray)
+    val med = median(responseDiffs.map(_.toDouble).toArray)
     println(s"$label - Median response time: $med ms")
   }
 
@@ -124,7 +128,7 @@ object Utils {
       filename: String
   ): Unit = {
     val canvas = boxplot(data, labels)
-    canvas.setAxisLabels("", yLabel)
+    canvas.setAxisLabels("xlabel", yLabel)
     // Export canvas as image
     val image: BufferedImage = canvas.toBufferedImage(800, 600)
 
