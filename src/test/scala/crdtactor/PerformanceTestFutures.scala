@@ -55,6 +55,7 @@ class PerformanceTestFutures
       val start = System.currentTimeMillis()
 
       println("Building requesters")
+      // TODO: Remove the gets and just keep puts for simplicity
       val requesters = (0 until N_ACTORS).map { i =>
         Future {
           val putRequestTimes = mutable.Map[String, Long]()
