@@ -142,11 +142,6 @@ class ActorFailureDetector(
     // TODO: Remove this if not needed
     case GetIdResponse(actorId) =>
       ctx.log.info(s"FailureDetector-$id: Received idResponse")
-
-//      startTimeoutTimer(actorId)
-//
-//      // Add the actor to the aliveActors map
-//      aliveActors += (id -> true)
       Behaviors.same
 
     // Only handle timeout if the actor is still alive
@@ -179,7 +174,7 @@ class ActorFailureDetector(
     case Heartbeat() =>
       ctx.log.info(s"FailureDetector-$id: Sending heartbeat")
       // Send the heartbeat to all other actors
-      for (actorId <- aliveActors.keys) {
+      for (actorId <- aliveActors.keys if aliveActors(actorId)) {
         // Get the actor from the 'others' map
         others.get(actorId) match {
           case Some(actor: ActorRef[CRDTActorV2.Command]) =>
@@ -194,22 +189,37 @@ class ActorFailureDetector(
     // Handle HeartbeatAck from CRDTActorV2
     case HeartbeatAck(from) =>
       ctx.log.info(s"FailureDetector-$id: Received heartbeat ack")
-      // Filter the actor from the others
-      val (actorId, actor) = others.filter(_._2 == from).head
 
-      // Update the aliveActors map if needed
-      if (!aliveActors(actorId)) {
-        // Set aliveActors to true
-        aliveActors += (actorId -> true)
+      // Filter the actor from the others
+      others.find(_._2 == from) match {
+        case Some((actorId, actor)) =>
+          // Update the aliveActors map if needed
+          if (!aliveActors(actorId)) {
+            // Set aliveActors to true
+            aliveActors += (actorId -> true)
+          }
+
+          // Restart timemout timer
+          startTimeoutTimer(actorId)
+        case None =>
+          ctx.log.info(s"FailureDetector-$id: Actor not found")
       }
 
-      // Restart timemout timer
-      startTimeoutTimer(actorId)
       Behaviors.same
 
     case MortalityNotice(from) =>
       ctx.log.info(s"FailureDetector-$id: Received MortalityNotice")
-      // Handle MortalityNotice from CRDTActorV2
+
+      others.find(_._2 == from) match {
+        case Some((actorId, actor)) =>
+          // Handle MortalityNotice message from CRDTActorV2
+          aliveActors += (actorId -> false)
+
+          ctx.log.info(s"FailureDetector-$id: AliveActors: $aliveActors")
+        case None =>
+          ctx.log.info(s"FailureDetector-$id: Actor not found")
+      }
+
       Behaviors.same
 
   Behaviors.same
