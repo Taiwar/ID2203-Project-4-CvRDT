@@ -80,26 +80,18 @@ class ActorFailureDetector(
 
   // Hack to get the actor references of the other actors, check out `lazy val`
   // Careful: make sure you know what you are doing if you are editing this code
-  private lazy val others =
-    Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
-
-  // Map with all the timerSchedules for the actors
-  // TODO: See if you need to remove it
-//  var actorTimers: Map[Int, TimerScheduler[Command]] = Map()
+  private lazy val others = Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]().filter(_._1 != id)
 
   // A map with all the other actors and a boolean if they are alive
   private val aliveActors = scala.collection.mutable.Map[Int, Boolean]()
 
   // Start the failure detector timer (heartbeat)
   private def startFailureDetectorTimer(): Unit = {
-    // Start the failure detector timer (heartbeat) with a random delay
-    val variance = 10.millis + Random.nextInt((epsilon.toMillis.toInt - 10) + 1).millis
-    val heartbeatTime = gamma + variance
 
     timers.startTimerWithFixedDelay(
       id, // Use the provided id or default to the actor's id
       ActorFailureDetector.Heartbeat(),
-      heartbeatTime // Time between heartbeats interval (Gamma γ)
+      gamma // Time between heartbeats interval (Gamma γ)
     )
   }
 
@@ -108,6 +100,8 @@ class ActorFailureDetector(
     // Start the failure detector timer (heartbeat) with a random delay
     val variance = 10.millis + Random.nextInt((epsilon.toMillis.toInt - 10) + 1).millis
     val timoutTime = T + variance
+
+    ctx.log.info(s"FailureDetector-$id: Starting timeout timer for actor $actorId with timeout $timoutTime")
 
     timers.startTimerWithFixedDelay(
       actorId, // Use the provided id or default to the actor's id
@@ -120,11 +114,12 @@ class ActorFailureDetector(
   private def stopTimer(id: Int): Unit = {
     timers.cancel(id)
   }
+
   private def handleHeartbeatAck() : Unit = {
     processTimeout = false
     // TODO: Check if timers.cancel & restart is needed
     timers.cancel(TimerKey)
-    startFailureDetectorTimer() // Reset the timer
+    startTimeoutTimer(id) // Reset the timer
   }
 
   // This is the event handler of the actor, implement its logic here
@@ -137,43 +132,39 @@ class ActorFailureDetector(
       // Start the failure detector timer
       startFailureDetectorTimer()
 
-      // Store the sender of the start message
-      messageSender = Some(from)
-
       // Setup ids for all actors
       for ((actorId, actor) <- others) {
         // Add actor to the aliveActors map
         aliveActors += (actorId -> true)
-
-        // Start the timeout timer for each actor
-        startTimeoutTimer(actorId)
       }
       Behaviors.same
 
+    // TODO: Remove this if not needed
     case GetIdResponse(actorId) =>
       ctx.log.info(s"FailureDetector-$id: Received idResponse")
 
-      startTimeoutTimer(actorId)
-
-      // Add the actor to the aliveActors map
-      aliveActors += (id -> true)
+//      startTimeoutTimer(actorId)
+//
+//      // Add the actor to the aliveActors map
+//      aliveActors += (id -> true)
       Behaviors.same
 
-    case Timeout(actorId: Int) =>
+    // Only handle timeout if the actor is still alive
+    case Timeout(actorId: Int) if aliveActors(actorId) =>
       ctx.log.info(s"FailureDetector-$id: Timeout")
       // Set aliveActors to false
       aliveActors += (actorId -> false)
 
+      // TODO: Check best way to handle this
       // Stop the timer
       stopTimer(actorId)
 
       // TODO: Notify the application that the actor is dead
-
       // Send the MortalityNotice to all other actors
-      for (actorId <- aliveActors.keys) {
-          if (aliveActors(actorId)) {
+      for (actor <- aliveActors.keys) {
+          if (aliveActors(actor)) {
             // Get the actor from the 'others' map
-            others.get(actorId) match {
+            others.get(actor) match {
               case Some(actor: ActorRef[CRDTActorV2.Command]) =>
                 // Send Heartbeat to the actor
                 actor ! CRDTActorV2.MortalityNotice(actor)
@@ -205,6 +196,12 @@ class ActorFailureDetector(
       ctx.log.info(s"FailureDetector-$id: Received heartbeat ack")
       // Filter the actor from the others
       val (actorId, actor) = others.filter(_._2 == from).head
+
+      // Update the aliveActors map if needed
+      if (!aliveActors(actorId)) {
+        // Set aliveActors to true
+        aliveActors += (actorId -> true)
+      }
 
       // Restart timemout timer
       startTimeoutTimer(actorId)
