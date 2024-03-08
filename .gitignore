@@ -13,3 +13,7 @@ target/
 .metals/
 .vscode/
 *metals.sbt
+
+evaluation/data/*
+evaluation/*.png
+!evaluation/*.example.png
