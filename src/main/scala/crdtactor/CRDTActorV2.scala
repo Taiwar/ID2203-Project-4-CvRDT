@@ -52,6 +52,8 @@ object CRDTActorV2 {
 
   case class MortalityNotice(actor: ActorRef[Command]) extends Command
 
+  case object Die extends Command
+
   // New message type to hold a MortalityNoticeWrapper from ActorFailureDetector
 //  case class MortalityNoticeWrapper(mortalityNotice: ActorFailureDetector.MortalityNoticeWrapper) extends Command
 
@@ -305,7 +307,13 @@ class CRDTActorV2(
 
     case MortalityNotice(actor) =>
       ctx.log.info(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetector.MortalityNotice(actor)
       Behaviors.same
+
+    case Die =>
+      context.log.info("Received PoisonPill, stopping...")
+      Behaviors.stopped
 
   Behaviors.same
 }
