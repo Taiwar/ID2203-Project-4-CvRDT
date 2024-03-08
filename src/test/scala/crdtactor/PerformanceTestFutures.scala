@@ -15,7 +15,7 @@ class PerformanceTestFutures
     with AnyWordSpecLike {
 
   trait StoreSystem {
-    val N_ACTORS = 8
+    val N_ACTORS = 4
 
     Utils.setLoggerLevel("INFO")
 
@@ -55,7 +55,7 @@ class PerformanceTestFutures
       // Get current time
       val start = System.currentTimeMillis()
 
-      println("TEST: Building requesters")
+      println("Building requesters")
       val requesters = (0 until N_ACTORS).map { i =>
         Future {
           val putRequestTimes = mutable.Map[String, Long]()
@@ -76,25 +76,29 @@ class PerformanceTestFutures
             actorRef ! Get(gId, Utils.randomString(), probes(i).ref)
             getRequestTimes.put(gId, getRequestTime)
             j += 1
-            // Thread.sleep(0, 5000)
+            Thread.sleep(0, 5000)
           }
           (putRequestTimes, getRequestTimes)
         }
       }
 
-      println("TEST: Building readers")
+      println("Building readers")
       // For each actor, create a thread reading from the thread probe
       val readers = (0 until N_ACTORS).map { i =>
         Future {
           val putResponseTimes = mutable.Map[String, Long]()
           val getResponseTimes = mutable.Map[String, Long]()
           while (TESTING) {
-            probes(i).receiveMessage(TEST_TIME.millis) match {
-              case PutResponse(pId, _) =>
-                putResponseTimes.put(pId, System.currentTimeMillis())
-              case GetResponse(gId, _, _) =>
-                getResponseTimes.put(gId, System.currentTimeMillis())
-              case _ => println(s"Unexpected message")
+            try {
+              probes(i).receiveMessage(TEST_TIME.millis) match {
+                case PutResponse(pId, _) =>
+                  putResponseTimes.put(pId, System.currentTimeMillis())
+                case GetResponse(gId, _, _) =>
+                  getResponseTimes.put(gId, System.currentTimeMillis())
+                case _ => println(s"Reader: Unexpected message")
+              }
+            } catch {
+              case e: Exception => println(s"Reader: Timed out $e")
             }
           }
           (putResponseTimes, getResponseTimes)
@@ -102,14 +106,11 @@ class PerformanceTestFutures
       }
 
       // Stop futures after TEST_TIME
-      println("TEST: Sleeping")
+      println("Letting futures run")
       Thread.sleep(TEST_TIME)
       // soft shutdown
       TESTING = false
-      println("TEST: Stopping")
-      // hard interrupt
-      // requesters.foreach(_.interrupt())
-      // readers.foreach(_.interrupt())
+      println("Stopping")
 
       // Collect results
       val responseTimes
@@ -118,14 +119,14 @@ class PerformanceTestFutures
           Future.sequence(readers),
           scala.concurrent.duration.Duration.Inf
         )
-      println("TEST: Responses collected")
+      println("Responses collected")
       val requestTimes
           : Seq[(mutable.Map[String, Long], mutable.Map[String, Long])] =
         Await.result(
           Future.sequence(requesters),
           scala.concurrent.duration.Duration.Inf
         )
-      println("TEST: Requests collected")
+      println("Requests collected")
 
       val end = System.currentTimeMillis()
       // Merge put and get request and response times from every future
@@ -146,56 +147,37 @@ class PerformanceTestFutures
       println(s"Average ops per second: $ops")
 
       // Calculate average response time for puts
-      var noMatch = 0
-      val putResponseTimesDiffs = putResponseTimes.map {
-        case (pId, responseTime) =>
-          putRequestTimes.get(pId) match
-            case None =>
-              println(s"WARNING: No match for put $pId")
-              noMatch += 1
-              0L // This should not happen, but this hack would create a bias if it did
-            case Some(requestTime) =>
-              responseTime - requestTime
-      }
-      val putResponseTimeAvg =
-        putResponseTimesDiffs.sum / putResponseTimesDiffs.size.max(1)
-      println(s"Average response time for puts: $putResponseTimeAvg ms")
+      val putResponseTimesDiffs: Seq[(Long, Long)] =
+        Utils.calculateResponseTimesDiffs(putResponseTimes, putRequestTimes)
+      Utils.printStats("Put", putResponseTimesDiffs)
 
-      val getResponseTimesDiffs = getResponseTimes.map {
-        case (gId, responseTime) =>
-          getRequestTimes.get(gId) match
-            case None =>
-              println(s"WARNING: No match for get $gId")
-              noMatch += 1
-              0L // This should not happen, but this hack would create a bias if it did
-            case Some(requestTime) =>
-              responseTime - requestTime
-      }
-
-      val getResponseTimeAvg =
-        getResponseTimesDiffs.sum / getResponseTimesDiffs.size.max(1)
-      println(s"Average response time for gets: $getResponseTimeAvg ms")
-
-      println(s"Total unmatched requests (should be 0): $noMatch")
+      val getResponseTimesDiffs: Seq[(Long, Long)] =
+        Utils.calculateResponseTimesDiffs(getResponseTimes, getRequestTimes)
+      Utils.printStats("Get", getResponseTimesDiffs)
 
       // Prepare data for put requests
-      val putCsvRows = putResponseTimesDiffs.map(_.toString)
-      val putCsv = putCsvRows.mkString("\n")
-      val putFilename = "evaluation/data/put_performance_test.csv"
-      val putFile = new java.io.File(putFilename)
-      val putBw = new java.io.BufferedWriter(new java.io.FileWriter(putFile))
-      putBw.write(putCsv)
-      putBw.close()
+      Utils.writeToSingleColumnCsv(
+        putResponseTimesDiffs,
+        "evaluation/data/put_performance_test.csv"
+      )
 
-      // Prepare data for get requests
-      val getCsvRows = getResponseTimesDiffs.map(_.toString)
-      val getCsv = getCsvRows.mkString("\n")
-      val getFilename = "evaluation/data/get_performance_test.csv"
-      val getFile = new java.io.File(getFilename)
-      val getBw = new java.io.BufferedWriter(new java.io.FileWriter(getFile))
-      getBw.write(getCsv)
-      getBw.close()
+      Utils.writeToSingleColumnCsv(
+        getResponseTimesDiffs,
+        "evaluation/data/get_performance_test.csv"
+      )
 
+      // Visualize with smile
+      val labels = Array("put", "get")
+      val data = Array(
+        putResponseTimesDiffs.map(_._2.toDouble).toArray,
+        getResponseTimesDiffs.map(_._2.toDouble).toArray
+      )
+      Utils.saveBoxPlot(
+        data,
+        labels,
+        "response time (ms)",
+        "evaluation/response_times.box.png"
+      )
     }
 
   }

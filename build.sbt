@@ -1,3 +1,5 @@
+import sbt.Keys.libraryDependencies
+
 lazy val pekkoVersion = "1.0.2"
 lazy val junitInterfaceVersion = "0.11"
 lazy val logbackversion = "1.4.14"
@@ -13,6 +15,8 @@ lazy val root = project
     libraryDependencies += "org.apache.pekko" %% "pekko-cluster-typed" % pekkoVersion,
     libraryDependencies += "com.novocode" % "junit-interface" % junitInterfaceVersion % "test",
     libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackversion,
+    // Evaluation
+    libraryDependencies += "com.github.haifengl" %% "smile-scala" % "3.0.2",
 
     // Test dependencies
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.18" % Test,
