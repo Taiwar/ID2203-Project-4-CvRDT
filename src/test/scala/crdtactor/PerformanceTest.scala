@@ -307,9 +307,9 @@ CRDTKVStore {
     }
 
     "mixed ops" in new StoreSystem {
-      // TODO: Add batching
       val PUT_PROB = 0.5
       val ATOMIC_PROB = 0.5
+      val BATCH_SIZE = 30
       // Utils.setLoggerLevel("INFO")
 
       // For each actor, create a thread sending writes and reads with equal frequency
@@ -337,20 +337,29 @@ CRDTKVStore {
 
             val requestTime = System.currentTimeMillis()
             val op = if (it.next() <= ATOMIC_PROB) {
-              val innerOp = if (it.next() <= PUT_PROB) {
-                puts += 1
-                Put("p" + opId, Utils.randomString(), j, probes(i).ref)
-              } else {
-                gets += 1
-                Get("g" + opId, Utils.randomString(), probes(i).ref)
+              // Generate BATCH_SIZE amount of inner ops
+              val innerOps = (0 until BATCH_SIZE).map { k =>
+                val kOpId = s"$i - $j - $k"
+                if (it.next() <= PUT_PROB) {
+                  val putKOpId = "p" + kOpId
+                  puts += 1
+                  requestTimes.put(putKOpId, requestTime)
+                  Put(putKOpId, Utils.randomString(), j, probes(i).ref)
+                } else {
+                  val getKOpId = "g" + kOpId
+                  gets += 1
+                  requestTimes.put(getKOpId, requestTime)
+                  Get(getKOpId, Utils.randomString(), probes(i).ref)
+                }
               }
               atomic += 1
               Atomic(
                 opId,
-                Array(innerOp),
+                innerOps,
                 probes(i).ref
               )
             } else {
+              requestTimes.put(opId, requestTime)
               if (it.next() <= PUT_PROB) {
                 puts += 1
                 Put(opId, Utils.randomString(), j, probes(i).ref)
@@ -361,9 +370,11 @@ CRDTKVStore {
             }
 
             actorRef ! op
-            requestTimes.put(opId, requestTime)
             j += 1
-            Thread.sleep(0, REQUEST_WAIT_NS)
+            Thread.sleep(
+              0,
+              REQUEST_WAIT_NS * BATCH_SIZE
+            ) // Assumption: Total amount of ops requests per second is the same
           }
           requestTimes
         }
@@ -376,8 +387,16 @@ CRDTKVStore {
           val responseTimes = mutable.Map[String, Long]()
           while (TESTING) {
             probes(i).receiveMessage() match {
-              case AtomicResponse(opId, _) =>
-                responseTimes.put(opId, System.currentTimeMillis())
+              case AtomicResponse(_, innerOps) =>
+                for ((_, op) <- innerOps) {
+                  op match {
+                    case PutResponse(opId, _) =>
+                      responseTimes.put(opId, System.currentTimeMillis())
+                    case GetResponse(opId, _, _) =>
+                      responseTimes.put(opId, System.currentTimeMillis())
+                    case m => println(s"Reader: Unexpected message $m")
+                  }
+                }
               case PutResponse(opId, _) =>
                 responseTimes.put(opId, System.currentTimeMillis())
               case GetResponse(opId, _, _) =>
@@ -432,6 +451,7 @@ CRDTKVStore {
       // Log total time and response count
       val requests = requestTimes.size
       val responses = responseTimes.size
+
       println(s"Total time: ${end - start} ms")
       println(s"Total requests: $requests")
       println(s"Total responses: $responses")
