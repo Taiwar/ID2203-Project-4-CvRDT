@@ -4,6 +4,7 @@ import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Be
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.cluster.ddata
 import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
+import org.apache.pekko.dispatch.ControlMessage
 
 import scala.concurrent.duration.DurationInt
 
@@ -17,7 +18,9 @@ object CRDTActorV4 {
   // External messages
 
   // For testing: Messages to read the current state of the CRDT
-  case class GetState(from: ActorRef[Command]) extends Request
+  case class GetState(from: ActorRef[Command])
+      extends ControlMessage
+      with Command
 
   case class State(state: ddata.LWWMap[String, Int]) extends Indication
 
@@ -77,7 +80,8 @@ object CRDTActorV4 {
 
   // Periodic delta messages
   private case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
-      extends Command
+      extends ControlMessage
+      with Command
 
   // Combines lock gathering and sync
   private case class Prepare(
@@ -98,7 +102,7 @@ object CRDTActorV4 {
       from: ActorRef[Command]
   ) extends Command
 
-  private case object Timeout extends Command
+  private case object Timeout extends ControlMessage with Command
   private case object TimerKey
 
   // Ballot leader election messages

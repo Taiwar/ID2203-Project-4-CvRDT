@@ -2,6 +2,7 @@ package crdtactor
 
 import crdtactor.CRDTActorV4.*
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
+import org.apache.pekko.actor.typed.MailboxSelector
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.scalatest.wordspec.AnyWordSpecLike
 
@@ -10,10 +11,19 @@ import scala.collection.mutable
 import scala.concurrent.*
 import scala.concurrent.duration.*
 
-class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
+class PerformanceTest
+    extends ScalaTestWithActorTestKit("""
+CRDTKVStore {
+  CRDTActor {
+    mailbox-type = "org.apache.pekko.dispatch.UnboundedControlAwareMailbox"
+  }
+}
+""")
+    with AnyWordSpecLike {
 
   trait StoreSystem {
     val TEST_TIME = 5000
+    val REQUEST_WAIT_NS = 5000 // 0.005 ms
     val N_ACTORS = 4
     var TESTING = true
     implicit val context: ExecutionContextExecutor =
@@ -24,11 +34,17 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     Utils.setLoggerLevel("WARN")
 
     // Create the actors
+    val props = MailboxSelector.fromConfig("CRDTKVStore.CRDTActor")
+
     val actors = (0 until N_ACTORS).map { i =>
       // Spawn the actor and get its reference (address)
-      val actorRef = spawn(Behaviors.setup[Command] { ctx =>
-        Behaviors.withTimers(timers => new CRDTActorV4(i, ctx, timers))
-      })
+      val actorRef = spawn(
+        Behaviors.setup[Command] { ctx =>
+          Behaviors.withTimers(timers => new CRDTActorV4(i, ctx, timers))
+        },
+        s"CRDTActor-$i",
+        props
+      )
       i -> actorRef
     }.toMap
 
@@ -74,7 +90,7 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
             actorRef ! Get(gId, Utils.randomString(), probes(i).ref)
             getRequestTimes.put(gId, getRequestTime)
             j += 1
-            Thread.sleep(0, 5000)
+            Thread.sleep(0, REQUEST_WAIT_NS)
           }
           (putRequestTimes, getRequestTimes)
         }
@@ -177,7 +193,7 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       )
     }
 
-    "basic all atomic ops" in new StoreSystem {
+    "basic all atomic ops (PUT)" in new StoreSystem {
       // For each actor, create a thread sending writes and reads with equal frequency
       val probes = (0 until N_ACTORS).map { i =>
         val probe = createTestProbe[Command]()
@@ -197,11 +213,11 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
             val opId = s"$i - $j"
 
             val requestTime = System.currentTimeMillis()
-            val p = Put(opId, Utils.randomString(), j, probes(i).ref)
+            val p = Put("p" + opId, Utils.randomString(), j, probes(i).ref)
             actorRef ! Atomic(opId, Array(p), probes(i).ref)
             requestTimes.put(opId, requestTime)
             j += 1
-            Thread.sleep(0, 5000)
+            Thread.sleep(0, REQUEST_WAIT_NS)
           }
           requestTimes
         }
@@ -209,7 +225,7 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       println("Building readers")
       // For each actor, create a thread reading from the thread probe
-      val readers = (0 until N_ACTORS).map { i =>
+      val readers = (0 until 4).map { i =>
         Future {
           val responseTimes = mutable.Map[String, Long]()
           while (TESTING) {
@@ -236,7 +252,7 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       seq.recover({ case e => println(s"Reader sequence: Error $e") })
       val responseTimesMap: Seq[mutable.Map[String, Long]] =
         Await.result(
-          Future.sequence(readers),
+          seq,
           scala.concurrent.duration.Duration.Inf
         )
       println("Responses collected")
@@ -247,13 +263,13 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         )
       println("Requests collected")
 
+      val end = System.currentTimeMillis()
       // Fetch store state with new probe
       val probe = createTestProbe[Command]()
       actors(0) ! GetState(probe.ref)
-      val state = probe.receiveMessage(5.seconds)
-      println(s"State: ${state.asInstanceOf[State].state.size}")
+      val state = probe.receiveMessage(10.seconds)
+      println(s"State size at end: ${state.asInstanceOf[State].state.size}")
 
-      val end = System.currentTimeMillis()
       // Merge request and response times from every future
       val requestTimes = requestTimesMap.reduce(_ ++ _)
       val responseTimes = responseTimesMap.reduce(_ ++ _)
@@ -287,6 +303,161 @@ class PerformanceTest extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       Utils.writeToCsv(
         responseTimesDiffs,
         "evaluation/data/atomic_performance_test.csv"
+      )
+    }
+
+    "mixed ops" in new StoreSystem {
+      // TODO: Add batching
+      val PUT_PROB = 0.5
+      val ATOMIC_PROB = 0.5
+      // Utils.setLoggerLevel("INFO")
+
+      // For each actor, create a thread sending writes and reads with equal frequency
+      val probes = (0 until N_ACTORS).map { i =>
+        val probe = createTestProbe[Command]()
+        probe
+      }
+
+      val it = Iterator.continually(math.random)
+
+      // Get current time
+      val start = System.currentTimeMillis()
+      println("Building requesters")
+      var atomic = 0
+      var puts = 0
+      var gets = 0
+      val requesters = (0 until N_ACTORS).map { i =>
+        Future {
+          val requestTimes = mutable.Map[String, Long]()
+
+          val actorRef = actors(i)
+          var j = 0
+          while (TESTING) {
+            val opId = s"$i - $j"
+
+            val requestTime = System.currentTimeMillis()
+            val op = if (it.next() <= ATOMIC_PROB) {
+              val innerOp = if (it.next() <= PUT_PROB) {
+                puts += 1
+                Put("p" + opId, Utils.randomString(), j, probes(i).ref)
+              } else {
+                gets += 1
+                Get("g" + opId, Utils.randomString(), probes(i).ref)
+              }
+              atomic += 1
+              Atomic(
+                opId,
+                Array(innerOp),
+                probes(i).ref
+              )
+            } else {
+              if (it.next() <= PUT_PROB) {
+                puts += 1
+                Put(opId, Utils.randomString(), j, probes(i).ref)
+              } else {
+                gets += 1
+                Get(opId, Utils.randomString(), probes(i).ref)
+              }
+            }
+
+            actorRef ! op
+            requestTimes.put(opId, requestTime)
+            j += 1
+            Thread.sleep(0, REQUEST_WAIT_NS)
+          }
+          requestTimes
+        }
+      }
+
+      println("Building readers")
+      // For each actor, create a thread reading from the thread probe
+      val readers = (0 until N_ACTORS).map { i =>
+        Future {
+          val responseTimes = mutable.Map[String, Long]()
+          while (TESTING) {
+            probes(i).receiveMessage() match {
+              case AtomicResponse(opId, _) =>
+                responseTimes.put(opId, System.currentTimeMillis())
+              case PutResponse(opId, _) =>
+                responseTimes.put(opId, System.currentTimeMillis())
+              case GetResponse(opId, _, _) =>
+                responseTimes.put(opId, System.currentTimeMillis())
+              case m => println(s"Reader: Unexpected message $m")
+            }
+          }
+          responseTimes
+        }.recover({ case e: Exception =>
+          println(s"Reader: Error $e")
+          mutable.Map.empty[String, Long]
+        })
+      }
+
+      // Stop futures after TEST_TIME
+      println("Letting futures run")
+      Thread.sleep(TEST_TIME)
+      // soft shutdown
+      TESTING = false
+      println("Stopping")
+
+      // Collect results
+      val responseTimesMap: Seq[mutable.Map[String, Long]] =
+        Await.result(
+          Future.sequence(readers),
+          scala.concurrent.duration.Duration.Inf
+        )
+      println("Responses collected")
+      val requestTimesMap: Seq[mutable.Map[String, Long]] =
+        Await.result(
+          Future.sequence(requesters),
+          scala.concurrent.duration.Duration.Inf
+        )
+      println("Requests collected")
+
+      val end = System.currentTimeMillis()
+      // Fetch store state with new probe
+      val probe = createTestProbe[Command]()
+      actors(0) ! GetState(probe.ref)
+      val state = probe.receiveMessage(10.seconds)
+      println(s"State size at end: ${state.asInstanceOf[State].state.size}")
+
+      // Merge request and response times from every future
+      val requestTimes = requestTimesMap.reduce(_ ++ _)
+      val responseTimes = responseTimesMap.reduce(_ ++ _)
+
+      // Log actual operation load
+      println(s"Atomic: $atomic")
+      println(s"Puts: $puts")
+      println(s"Gets: $gets")
+
+      // Log total time and response count
+      val requests = requestTimes.size
+      val responses = responseTimes.size
+      println(s"Total time: ${end - start} ms")
+      println(s"Total requests: $requests")
+      println(s"Total responses: $responses")
+      println(s"Total unmatched requests: ${requests - responses}")
+      // Calculate average ops per second
+      val ops = responses / ((end - start) / 1000)
+      println(s"Average ops per second: $ops")
+
+      // Write total responses and time to file
+      Utils.writeToCsv(
+        Seq(
+          ("Total requests", "Total responses", "Total time (ms)"),
+          (requests.toString, responses.toString, (end - start).toString)
+        ),
+        s"evaluation/data/${ATOMIC_PROB}_atomic_performance_test.totals.csv"
+      )
+
+      // Calculate average response time for puts
+      val responseTimesDiffs: Seq[(String, String, Long)] =
+        Utils.calculateResponseTimesDiffs(responseTimes, requestTimes)
+      Utils.printStats(s"$ATOMIC_PROB Atomic", responseTimesDiffs.map(_._3))
+
+      // Prepare data for put requests
+      Utils.writeToCsv(
+        responseTimesDiffs,
+        s"evaluation/data/${ATOMIC_PROB}_atomic_performance_test.csv"
       )
     }
 
