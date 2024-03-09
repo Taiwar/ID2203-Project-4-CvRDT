@@ -142,7 +142,7 @@ class ActorFailureDetectorV2(
       Behaviors.same
 
     // Only handle timeout if the actor is still alive
-    case Timeout(actorId: Int) if aliveActors(actorId) =>
+    case Timeout(actorId: Int) =>
       ctx.log.info(s"FailureDetector-$id: Timeout for actor $actorId")
       // Set aliveActors to false
       aliveActors += (actorId -> false)
