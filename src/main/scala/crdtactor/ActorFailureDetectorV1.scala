@@ -1,6 +1,6 @@
 package crdtactor
 
-import ActorFailureDetector.Command
+import ActorFailureDetectorV1.Command
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.cluster.ddata
@@ -9,7 +9,7 @@ import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
 import scala.concurrent.duration.DurationInt
 import scala.util.Random
 
-object ActorFailureDetector {
+object ActorFailureDetectorV1 {
   // The type of messages that the actor can handle
   sealed trait Command
 
@@ -60,12 +60,12 @@ object ActorFailureDetector {
   private var processTimeout = true
 }
 
-import crdtactor.ActorFailureDetector.*
+import crdtactor.ActorFailureDetectorV1.*
 
 // The actor implementation of the (perfect) failure detector
 // Note: the current implementation assumes perfect failure detection and does not
 // handle network partitions or other failure scenarios
-class ActorFailureDetector(
+class ActorFailureDetectorV1(
                    // id is the unique identifier of the actor, ctx is the actor context
                    id: Int,
                    ctx: ActorContext[Command],
@@ -90,7 +90,7 @@ class ActorFailureDetector(
 
     timers.startTimerWithFixedDelay(
       id, // Use the provided id or default to the actor's id
-      ActorFailureDetector.Heartbeat(),
+      ActorFailureDetectorV1.Heartbeat(),
       gamma // Time between heartbeats interval (Gamma γ)
     )
   }
@@ -105,7 +105,7 @@ class ActorFailureDetector(
 
     timers.startTimerWithFixedDelay(
       actorId, // Use the provided id or default to the actor's id
-      ActorFailureDetector.Timeout(actorId),
+      ActorFailureDetectorV1.Timeout(actorId),
       timoutTime // Time between heartbeats interval (Gamma γ)
     )
   }
