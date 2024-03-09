@@ -143,33 +143,47 @@ class ActorFailureDetectorV2(
 
     // Only handle timeout if the actor is still alive
     case Timeout(actorId: Int) if aliveActors(actorId) =>
-      ctx.log.info(s"FailureDetector-$id: Timeout")
+      ctx.log.info(s"FailureDetector-$id: Timeout for actor $actorId")
       // Set aliveActors to false
       aliveActors += (actorId -> false)
 
-      // TODO: Check best way to handle this
-      // Stop the timer
-      stopTimer(actorId)
+      var deadActor: Option[ActorRef[CRDTActorV4.Command]] = None
 
-      // TODO: Notify the application that the actor is dead
-      // Send the MortalityNotice to all other actors
-      for (actor <- aliveActors.keys) {
-          if (aliveActors(actor)) {
-            // Get the actor from the 'others' map
-            others.get(actor) match {
-              case Some(actor: ActorRef[CRDTActorV4.Command]) =>
-                // Send Heartbeat to the actor
-                actor ! CRDTActorV4.MortalityNotice(actor)
-              case _ =>
-              // Skip the actor if it is not found or not of the correct type
+      // Get the actor from the 'others' map or skip the rest of the code
+      others.get(actorId) match {
+        case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+          deadActor = Some(actor)
+
+          // TODO: Check best way to handle this
+          // Stop the timer
+          stopTimer(actorId)
+
+          // TODO: Notify the application that the actor is dead
+          // Send the MortalityNotice to all other actors
+          for (actor <- aliveActors.keys) {
+            if (aliveActors(actor)) {
+              // Get the actor from the 'others' map
+              others.get(actor) match {
+                case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+                  // Send Heartbeat to the actor
+                  actor ! CRDTActorV4.MortalityNotice(deadActor.get)
+                case _ =>
+                  ctx.log.info(s"FailureDetector-$id: Actor not found")
+              }
             }
           }
+        case _ =>
+          ctx.log.info(s"FailureDetector-$id: Actor not found")
       }
+
       Behaviors.same
 
     // Heartbeat handling
     case Heartbeat() =>
       ctx.log.info(s"FailureDetector-$id: Sending heartbeat")
+
+      ctx.log.info(s"FailureDetector-$id: AliveActors: $aliveActors")
+
       // Send the heartbeat to all other actors
       for (actorId <- aliveActors.keys if aliveActors(actorId)) {
         // Get the actor from the 'others' map
