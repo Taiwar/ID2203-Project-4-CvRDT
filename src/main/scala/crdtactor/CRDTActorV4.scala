@@ -61,6 +61,8 @@ object CRDTActorV4 {
       responses: Iterable[(String, Command)]
   ) extends Indication
 
+  case class AtomicAbort(opId: String) extends Indication
+
   // Error responses
 
   case class UnknownCommandResponse() extends Indication
@@ -139,16 +141,18 @@ class CRDTActorV4(
   private var time = (id, 0)
   private val pendingTransactionLocks =
     mutable.Map[(Int, Int), Iterable[String]]()
+
+  private val locks = mutable.Map[String, Int]()
+  private val commandBuffer = mutable.Queue[Command]()
+  private val atomicCommandBuffer = mutable.Queue[Command]()
+  private var dirty = false
+
+  // Leader state
   private val pendingTransactionAgreement =
     mutable.Map[(Int, Int), Int]()
   private val pendingTransactions =
     mutable.Map[(Int, Int), ForwardAtomic]()
-  // TODO: Remove locks if leader dies
-  private val locks = mutable.Map[String, Int]()
-  private val commandBuffer = mutable.Queue[Command]()
-  private val atomicCommandBuffer = mutable.Queue[Command]()
-
-  private var dirty = false
+  private var transactionWorking = false
 
   // Start timer to periodically broadcast the delta
   timers.startTimerWithFixedDelay(
@@ -186,15 +190,42 @@ class CRDTActorV4(
     // Handle leader
     case Leader(l) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
+      // If no leader before, nothing to do
+      if (leader.isEmpty)
+        leader = Some(l)
+        return Behaviors.same
+      // If leader is replacing old one, we need to abort ongoing transactions
+      if (leader.get != l)
+        ctx.log.warn(s"CRDTActor-$id: Leader change detected")
+        // Clear pending transactions
+        pendingTransactionAgreement.clear()
+        pendingTransactions.clear()
+        // Unlock all locks
+        locks.clear()
+
+        // If we're now leader, we need to abort ongoing atomic commands
+        if (l == ctx.self)
+          ctx.log.warn(s"CRDTActor-$id: I'm the new leader")
+          // Send abort to all atomic commands in pendingTransactions
+          pendingTransactions.foreach { case (_, tx) =>
+            tx.origin ! AtomicAbort(tx.opId)
+          }
       leader = Some(l)
-      // TODO: handle getting a new leader, we need to abort ongoing transactions and drop locks
       Behaviors.same
 
     case Timeout =>
-      // Send deltas if dirty
+      // Don't send deltas if we're currently executing a transaction, but queue a delta for later
+      if (transactionWorking) {
+        ctx.self ! Timeout
+        return Behaviors.same
+      }
+      // Send deltas only if dirty
       if (!dirty) return Behaviors.same
-      // TODO: Don't send deltas if we're currently executing a transaction
       broadcastAndResetDeltas()
+      // Print if leader
+      if (leader.get == ctx.self) {
+        ctx.log.info(s"Leader-$id: Sending delta")
+      }
       Behaviors.same
 
     case Put(opId, key, value, from) =>
@@ -249,6 +280,12 @@ class CRDTActorV4(
 
     case Prepare(timestamp, keys, from) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming Prepare operation $timestamp")
+      // Only respond if source is leader
+      if (leader.isEmpty || leader.get != from) {
+        ctx.log.warn(s"CRDTActor-$id: Not leader")
+        return Behaviors.same
+      }
+
       pendingTransactionLocks += (timestamp -> keys)
       keys.foreach { key =>
         locks(key) = 1
@@ -280,6 +317,7 @@ class CRDTActorV4(
         )
         // Get commands from pending transactions
         val tx = pendingTransactions(timestamp)
+        transactionWorking = true
 
         // Execute commands in tx
         val responses = tx.commands.map {
@@ -305,6 +343,7 @@ class CRDTActorV4(
             ctx.log.warn(s"Leader-$id: Unknown command")
             ("unknown", UnknownCommandResponse())
         }
+        transactionWorking = false
 
         // Remove transaction from pending
         pendingTransactionAgreement -= timestamp
@@ -323,6 +362,11 @@ class CRDTActorV4(
     // Handle commit
     case Commit(timestamp, from) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming Commit operation $timestamp")
+      if (leader.isEmpty || leader.get != from) {
+        ctx.log.warn(s"CRDTActor-$id: Not leader")
+        return Behaviors.same
+      }
+
       // Unlock keys
       val keys = pendingTransactionLocks(timestamp)
       keys.foreach { key =>
@@ -350,12 +394,20 @@ class CRDTActorV4(
         case Some(l) =>
           l ! ForwardAtomic(opId, from, commands, ctx.self)
         case None =>
-          // TODO: This can also happen if a leader failed
           ctx.log.warn(s"CRDTActor-$id: No leader")
           from ! NoLeaderResponse()
       Behaviors.same
 
     case ForwardAtomic(opId, origin, commands, from) =>
+      // If we're not leader, reply with abort
+      if (leader.isEmpty || leader.get != ctx.self) {
+        ctx.log.warn(
+          s"CRDTActor-$id: Not leader, cannot handle atomic operation"
+        )
+        origin ! AtomicAbort(opId)
+        return Behaviors.same
+      }
+
       // Get all used keys from commands
       val keys = commands.flatMap {
         case Put(opId, key, _, _) => Some(key)
