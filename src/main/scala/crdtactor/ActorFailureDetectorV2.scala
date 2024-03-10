@@ -14,7 +14,7 @@ object ActorFailureDetectorV2 {
   sealed trait Command
 
   // Triggers the actor to start the computation (do this only once!)
-  case class Start(from: ActorRef[CRDTActorV4.Command]) extends Command
+  case class Start(from: ActorRef[CRDTActorV4.Command], revived: Boolean) extends Command
 
   case class StateMsg(state: ddata.LWWMap[String, Int]) extends Command
 
@@ -34,6 +34,9 @@ object ActorFailureDetectorV2 {
   case class Heartbeat() extends Command
 
   case class HeartbeatAck(from: ActorRef[CRDTActorV4.Command]) extends Command
+
+  // Join
+  case class JoinRequest(newActor: ActorRef[CRDTActorV4.Command]) extends Command
 
   // Time
 
@@ -75,12 +78,20 @@ class ActorFailureDetectorV2(
   // The CRDT address of this actor/node, used for the CRDT state to identify the nodes
   private val selfNode = Utils.nodeFactory()
 
-  // Hack to get the actor references of the other actors, check out `lazy val`
-  // Careful: make sure you know what you are doing if you are editing this code
-  private lazy val others = Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]().filter(_._1 != id)
+  // Define the variable
+  var others: Map[Int, ActorRef[Command]] = Map()
+
+  // Define a method to update the variable
+  def refreshOthers(): Unit = {
+    others = Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]().filter(_._1 != id)
+  }
 
   // A map with all the other actors and a boolean if they are alive
   private val aliveActors = scala.collection.mutable.Map[Int, Boolean]()
+
+  // TODO: Check if this is needed
+  // A set of actors that are not synchronized
+  private val notSynchronizedActors = scala.collection.mutable.Set[ActorRef[CRDTActorV4.Command]]()
 
   // Start the failure detector timer (heartbeat)
   private def startFailureDetectorTimer(): Unit = {
@@ -115,7 +126,7 @@ class ActorFailureDetectorV2(
   private def handleHeartbeatAck() : Unit = {
     processTimeout = false
     // TODO: Check if timers.cancel & restart is needed
-    timers.cancel(TimerKey)
+//    timers.cancel(TimerKey)
     startTimeoutTimer(id) // Reset the timer
   }
 
@@ -123,8 +134,24 @@ class ActorFailureDetectorV2(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
-    case Start(from) =>
-      ctx.log.info(s"FailureDetector-$id started")
+    case Start(from, revived) =>
+      ctx.log.info(s"FailureDetector-$id started by ${from.path.name}")
+
+      refreshOthers()
+
+      // If the actor is revived, inform all other actors
+      if (revived) {
+        for (actor <- others.keys) {
+          // Get the actor from the 'others' map
+          others.get(actor) match {
+            case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+              // Send Heartbeat to the actor
+              actor ! CRDTActorV4.RequestToJoin(from)
+            case _ =>
+              ctx.log.info(s"FailureDetector-$id: Actor not found")
+          }
+        }
+      }
 
       // Start the failure detector timer
       startFailureDetectorTimer()
@@ -227,6 +254,25 @@ class ActorFailureDetectorV2(
           aliveActors += (actorId -> false)
 
           ctx.log.info(s"FailureDetector-$id: AliveActors: $aliveActors")
+        case None =>
+          ctx.log.info(s"FailureDetector-$id: Actor not found")
+      }
+      Behaviors.same
+
+    case JoinRequest(newActor) =>
+      ctx.log.info(s"FailureDetector-$id: Received JoinRequest from ${newActor.path.name}")
+
+      // Refresh the actor references
+      refreshOthers()
+
+      ctx.log.info(s"FailureDetector-$id: Updated others: $others")
+      // Get the id of the new actor from the others
+      others.find(_._2 == newActor) match {
+        case Some((actorId, actor)) =>
+          // Add the new actor to the aliveActors map
+          aliveActors += (actorId -> true)
+
+          ctx.log.info(s"FailureDetector-$id: Updated aliveActors: $aliveActors")
         case None =>
           ctx.log.info(s"FailureDetector-$id: Actor not found")
       }
