@@ -101,7 +101,7 @@ class CRDTActorV2(
         crdtstate = crdtstate.resetDelta // May be omitted
         others.foreach { //
           (name, actorRef) =>
-            Thread.sleep(Utils.RANDOM_BC_DELAY)
+            Thread.sleep(Utils.RANDOM_MESSAGE_DELAY)
             actorRef !
               // Send the delta to the other actors
               DeltaMsg(ctx.self, delta)
@@ -158,7 +158,7 @@ class CRDTActorV2(
 
     case RequestSync(from) =>
       ctx.log.info(s"CRDTActor-$id: Sending delta to ${from.path.name}")
-      Thread.sleep(Utils.RANDOM_BC_DELAY)
+      Thread.sleep(Utils.RANDOM_MESSAGE_DELAY)
       // Only send delta if is not empty
       if (crdtstate.delta.isDefined) {
         from ! DeltaMsg(ctx.self, crdtstate.delta.get)
@@ -192,7 +192,7 @@ class CRDTActorV2(
 
       // Gather locks
       others.foreach { (_, actorRef) =>
-        Thread.sleep(Utils.RANDOM_BC_DELAY)
+        Thread.sleep(Utils.RANDOM_MESSAGE_DELAY)
         actorRef ! GatherLocks(keys, ctx.self)
       }
 
@@ -202,7 +202,7 @@ class CRDTActorV2(
 
       // Request sync
       others.foreach { (_, actorRef) =>
-        Thread.sleep(Utils.RANDOM_BC_DELAY)
+        Thread.sleep(Utils.RANDOM_MESSAGE_DELAY)
         actorRef ! RequestSync(ctx.self)
       }
 
@@ -225,7 +225,7 @@ class CRDTActorV2(
 
       // Release locks
       others.foreach { (_, actorRef) =>
-        Thread.sleep(Utils.RANDOM_BC_DELAY)
+        Thread.sleep(Utils.RANDOM_MESSAGE_DELAY)
         actorRef ! ReleaseLocks(keys, ctx.self)
       }
       // Wait for responses

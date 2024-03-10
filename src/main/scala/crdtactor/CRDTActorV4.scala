@@ -9,7 +9,7 @@ import org.apache.pekko.dispatch.ControlMessage
 import scala.collection.mutable
 import scala.concurrent.duration.DurationInt
 
-val USE_DUAL_BUFFER = false
+val USE_DUAL_BUFFER = true
 
 object CRDTActorV4 {
   // The type of messages that the actor can handle
@@ -18,8 +18,8 @@ object CRDTActorV4 {
   sealed trait Request extends Command
   sealed trait Indication extends Command
 
+  case class DelayedMessage(message: Command) extends Command
   // External messages
-
   // For testing: Messages to read the current state of the CRDT
   case class GetState(from: ActorRef[Command])
       extends ControlMessage
@@ -179,7 +179,7 @@ class CRDTActorV4(
           (name, actorRef) =>
             actorRef !
               // Send the delta to the other actors
-              DeltaMsg(ctx.self, delta)
+              DelayedMessage(DeltaMsg(ctx.self, delta))
         }
         dirty = false
 
@@ -187,11 +187,24 @@ class CRDTActorV4(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
+    // Receive DelayedMessage and send the internal message to ourselves after a delay
+    case DelayedMessage(message) =>
+      // Schedule the message to be sent to ourselves after Utils.RANDOM_MESSAGE_DELAY
+      timers.startSingleTimer(
+        message,
+        message,
+        Utils.RANDOM_MESSAGE_DELAY.milliseconds
+      )
+      Behaviors.same
+
     // Handle leader
     case Leader(l) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming leader - ${l.path.name}")
       // If no leader before, nothing to do
       if (leader.isEmpty)
+        ctx.log.warn(s"CRDTActor-$id: Starting system with new leader")
+        if (l == ctx.self)
+          ctx.log.warn(s"CRDTActor-$id: I'm the new leader!")
         leader = Some(l)
         return Behaviors.same
       // If leader is replacing old one, we need to abort ongoing transactions
@@ -222,7 +235,7 @@ class CRDTActorV4(
       if (!dirty) return Behaviors.same
       broadcastAndResetDeltas()
       // Print if leader
-      if (leader.get == ctx.self) {
+      if (leader.isDefined && leader.get == ctx.self) {
         ctx.log.info(s"Leader-$id: Sending delta")
       }
       Behaviors.same
@@ -290,7 +303,9 @@ class CRDTActorV4(
         locks(key) = 1
       }
       // We don't need to execute the transaction on every node like in full 2PC, for SC it's enough to get the result sent to us by the leader later
-      from ! PrepareResponse(timestamp, ctx.self, crdtstate.delta)
+      from ! DelayedMessage(
+        PrepareResponse(timestamp, ctx.self, crdtstate.delta)
+      )
       Behaviors.same
 
     case PrepareResponse(timestamp, _, delta) =>
@@ -353,7 +368,7 @@ class CRDTActorV4(
 
         // Send commit to all others to unlock keys
         everyone.foreach { (_, actorRef) =>
-          actorRef ! Commit(timestamp, ctx.self)
+          actorRef ! DelayedMessage(Commit(timestamp, ctx.self))
         }
       }
       Behaviors.same
@@ -391,7 +406,7 @@ class CRDTActorV4(
       // If we are not the leader, forward to leader
       leader match
         case Some(l) =>
-          l ! ForwardAtomic(opId, from, commands, ctx.self)
+          l ! DelayedMessage(ForwardAtomic(opId, from, commands, ctx.self))
         case None =>
           ctx.log.warn(s"CRDTActor-$id: No leader")
           from ! NoLeaderResponse()
@@ -452,7 +467,7 @@ class CRDTActorV4(
 
       // Send prepare to others
       others.foreach { (_, actorRef) =>
-        actorRef ! Prepare(timestamp, keys, ctx.self)
+        actorRef ! DelayedMessage(Prepare(timestamp, keys, ctx.self))
       }
       Behaviors.same
 
