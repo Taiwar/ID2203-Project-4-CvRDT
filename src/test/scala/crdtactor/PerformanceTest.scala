@@ -24,8 +24,9 @@ CRDTKVStore {
 
   trait StoreSystem {
     // Configuration
-    val TEST_TIME = 5000
-    val REQUEST_WAIT_NS = 75000 // 0.75 ms
+    val TEST_TIME = 60000
+    val REQUEST_WAIT_MS = 1
+    val REQUEST_WAIT_NS = 50000 // 0.5 ms
     val REQUEST_WAIT_NS_VARIANCE = 25000 // 0.25 ms
     val N_ACTORS = 4
 
@@ -313,8 +314,8 @@ CRDTKVStore {
 
     "mixed ops" in new StoreSystem {
       val PUT_PROB = 0.5
-      val ATOMIC_PROB = 1
-      val BATCH_SIZE = 1
+      val ATOMIC_PROB = 0.7
+      val BATCH_SIZE = 20
       // Utils.setLoggerLevel("INFO")
 
       // For each actor, create a thread sending writes and reads with equal frequency
@@ -380,8 +381,8 @@ CRDTKVStore {
                 REQUEST_WAIT_NS + REQUEST_WAIT_NS_VARIANCE
               )
             Thread.sleep(
-              0,
-              randSleep * BATCH_SIZE
+              REQUEST_WAIT_MS * BATCH_SIZE,
+              randSleep
             ) // Assumption: Total amount of ops requests per second is the same
           }
           requestTimes
@@ -394,12 +395,14 @@ CRDTKVStore {
         mutable.Map[String, Long]()
       }
       // For each actor, create a thread reading from the thread probe
+      var reads = 0
       val readers = (0 until N_ACTORS).map { i =>
         Future {
           val responseTimeMap = responseTimeMaps(i)
           while (TESTING) {
             probes(i).receiveMessage() match {
               case AtomicResponse(_, innerOps) =>
+                reads += 1
                 for ((_, op) <- innerOps) {
                   op match {
                     case PutResponse(opId, _) =>
@@ -410,8 +413,10 @@ CRDTKVStore {
                   }
                 }
               case PutResponse(opId, _) =>
+                reads += 1
                 responseTimeMap.put(opId, System.currentTimeMillis())
               case GetResponse(opId, _, _) =>
+                reads += 1
                 responseTimeMap.put(opId, System.currentTimeMillis())
               case m => println(s"Reader: Unexpected message $m")
             }
@@ -467,6 +472,7 @@ CRDTKVStore {
       println(s"Total time: ${end - start} ms")
       println(s"Total requests: $requests")
       println(s"Total responses: $responses")
+      println(s"Total reads: $reads")
       println(s"Total unmatched requests: ${requests - responses}")
       // Calculate average ops per second
       val ops = responses / ((end - start) / 1000)

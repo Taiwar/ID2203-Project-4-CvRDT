@@ -38,7 +38,7 @@ object Utils {
   // Global state which can be shared between the actors
   // Note: this is an "anti-pattern", use it only for the bootstrapping process
   final val GLOBAL_STATE = new SynchronizedState()
-  final val RANDOM_MESSAGE_DELAY = 500
+  final val RANDOM_MESSAGE_DELAY = 50
   final val CRDT_SYNC_PERIOD = 500
 
   // Pessimistic total estimated delay for testing purposes
