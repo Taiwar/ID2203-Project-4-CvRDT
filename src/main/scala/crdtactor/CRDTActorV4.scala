@@ -6,7 +6,10 @@ import org.apache.pekko.cluster.ddata
 import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
 import org.apache.pekko.dispatch.ControlMessage
 
+import scala.collection.mutable
 import scala.concurrent.duration.DurationInt
+
+val USE_DUAL_BUFFER = false
 
 object CRDTActorV4 {
   // The type of messages that the actor can handle
@@ -135,15 +138,15 @@ class CRDTActorV4(
 
   private var time = (id, 0)
   private val pendingTransactionLocks =
-    scala.collection.mutable.Map[(Int, Int), Iterable[String]]()
+    mutable.Map[(Int, Int), Iterable[String]]()
   private val pendingTransactionAgreement =
-    scala.collection.mutable.Map[(Int, Int), Int]()
+    mutable.Map[(Int, Int), Int]()
   private val pendingTransactions =
-    scala.collection.mutable.Map[(Int, Int), ForwardAtomic]()
+    mutable.Map[(Int, Int), ForwardAtomic]()
   // TODO: Remove locks if leader dies
-  private val locks = scala.collection.mutable.Map[String, Int]()
-  // TODO: Maybe we should have separate buffers for regular and atomic commands and execute regular commands first
-  private val commandBuffer = scala.collection.mutable.Queue[Command]()
+  private val locks = mutable.Map[String, Int]()
+  private val commandBuffer = mutable.Queue[Command]()
+  private val atomicCommandBuffer = mutable.Queue[Command]()
 
   private var dirty = false
 
@@ -328,10 +331,14 @@ class CRDTActorV4(
       pendingTransactionLocks -= timestamp
 
       // Work through and empty buffer
-
       ctx.log.debug(s"CRDTActor-$id: Executing buffered commands")
       while (commandBuffer.nonEmpty) {
         val command = commandBuffer.dequeue()
+        ctx.self ! command
+      }
+      // Queue atomic commands after regular commands
+      while (atomicCommandBuffer.nonEmpty) {
+        val command = atomicCommandBuffer.dequeue()
         ctx.self ! command
       }
       Behaviors.same
@@ -361,8 +368,13 @@ class CRDTActorV4(
         ctx.log.debug(
           s"Leader-$id: Queuing transaction due to locks"
         )
-
-        commandBuffer.enqueue(ForwardAtomic(opId, origin, commands, from))
+        if (USE_DUAL_BUFFER) {
+          atomicCommandBuffer.enqueue(
+            ForwardAtomic(opId, origin, commands, from)
+          )
+        } else {
+          commandBuffer.enqueue(Atomic(opId, commands, from))
+        }
         return Behaviors.same
       }
 
