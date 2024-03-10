@@ -10,6 +10,7 @@ import java.util.concurrent.Executors
 import scala.collection.mutable
 import scala.concurrent.*
 import scala.concurrent.duration.*
+import scala.util.Random
 
 class PerformanceTest
     extends ScalaTestWithActorTestKit("""
@@ -22,9 +23,14 @@ CRDTKVStore {
     with AnyWordSpecLike {
 
   trait StoreSystem {
-    val TEST_TIME = 5000
-    val REQUEST_WAIT_NS = 5000 // 0.005 ms
+    // Configuration
+    val TEST_TIME = 60000
+    val REQUEST_WAIT_MS = 1
+    val REQUEST_WAIT_NS = 50000 // 0.5 ms
+    val REQUEST_WAIT_NS_VARIANCE = 25000 // 0.25 ms
     val N_ACTORS = 4
+
+    // Shared variable between threads, do not edit manually
     var TESTING = true
     implicit val context: ExecutionContextExecutor =
       ExecutionContext.fromExecutor(
@@ -307,9 +313,9 @@ CRDTKVStore {
     }
 
     "mixed ops" in new StoreSystem {
-      // TODO: Add batching
       val PUT_PROB = 0.5
-      val ATOMIC_PROB = 0.5
+      val ATOMIC_PROB = 0.7
+      val BATCH_SIZE = 20
       // Utils.setLoggerLevel("INFO")
 
       // For each actor, create a thread sending writes and reads with equal frequency
@@ -337,20 +343,27 @@ CRDTKVStore {
 
             val requestTime = System.currentTimeMillis()
             val op = if (it.next() <= ATOMIC_PROB) {
-              val innerOp = if (it.next() <= PUT_PROB) {
-                puts += 1
-                Put("p" + opId, Utils.randomString(), j, probes(i).ref)
-              } else {
-                gets += 1
-                Get("g" + opId, Utils.randomString(), probes(i).ref)
+              // Generate BATCH_SIZE amount of inner ops
+              val innerOps = (0 until BATCH_SIZE).map { k =>
+                val kOpId = s"$opId - $k"
+                if (it.next() <= PUT_PROB) {
+                  puts += 1
+                  requestTimes.put(kOpId, requestTime)
+                  Put(kOpId, Utils.randomString(), j, probes(i).ref)
+                } else {
+                  gets += 1
+                  requestTimes.put(kOpId, requestTime)
+                  Get(kOpId, Utils.randomString(), probes(i).ref)
+                }
               }
               atomic += 1
               Atomic(
                 opId,
-                Array(innerOp),
+                innerOps,
                 probes(i).ref
               )
             } else {
+              requestTimes.put(opId, requestTime)
               if (it.next() <= PUT_PROB) {
                 puts += 1
                 Put(opId, Utils.randomString(), j, probes(i).ref)
@@ -361,34 +374,57 @@ CRDTKVStore {
             }
 
             actorRef ! op
-            requestTimes.put(opId, requestTime)
             j += 1
-            Thread.sleep(0, REQUEST_WAIT_NS)
+            val randSleep =
+              Random.between(
+                REQUEST_WAIT_NS - REQUEST_WAIT_NS_VARIANCE,
+                REQUEST_WAIT_NS + REQUEST_WAIT_NS_VARIANCE
+              )
+            Thread.sleep(
+              REQUEST_WAIT_MS * BATCH_SIZE,
+              randSleep
+            ) // Assumption: Total amount of ops requests per second is the same
           }
           requestTimes
         }
       }
 
       println("Building readers")
+      // Init responseTimeMap for each actor
+      val responseTimeMaps = (0 until N_ACTORS).map { _ =>
+        mutable.Map[String, Long]()
+      }
       // For each actor, create a thread reading from the thread probe
+      var reads = 0
       val readers = (0 until N_ACTORS).map { i =>
         Future {
-          val responseTimes = mutable.Map[String, Long]()
+          val responseTimeMap = responseTimeMaps(i)
           while (TESTING) {
             probes(i).receiveMessage() match {
-              case AtomicResponse(opId, _) =>
-                responseTimes.put(opId, System.currentTimeMillis())
+              case AtomicResponse(_, innerOps) =>
+                reads += 1
+                for ((_, op) <- innerOps) {
+                  op match {
+                    case PutResponse(opId, _) =>
+                      responseTimeMap.put(opId, System.currentTimeMillis())
+                    case GetResponse(opId, _, _) =>
+                      responseTimeMap.put(opId, System.currentTimeMillis())
+                    case m => println(s"Reader: Unexpected message $m")
+                  }
+                }
               case PutResponse(opId, _) =>
-                responseTimes.put(opId, System.currentTimeMillis())
+                reads += 1
+                responseTimeMap.put(opId, System.currentTimeMillis())
               case GetResponse(opId, _, _) =>
-                responseTimes.put(opId, System.currentTimeMillis())
+                reads += 1
+                responseTimeMap.put(opId, System.currentTimeMillis())
               case m => println(s"Reader: Unexpected message $m")
             }
           }
-          responseTimes
+          responseTimeMap
         }.recover({ case e: Exception =>
           println(s"Reader: Error $e")
-          mutable.Map.empty[String, Long]
+          responseTimeMaps(i)
         })
       }
 
@@ -432,9 +468,11 @@ CRDTKVStore {
       // Log total time and response count
       val requests = requestTimes.size
       val responses = responseTimes.size
+
       println(s"Total time: ${end - start} ms")
       println(s"Total requests: $requests")
       println(s"Total responses: $responses")
+      println(s"Total reads: $reads")
       println(s"Total unmatched requests: ${requests - responses}")
       // Calculate average ops per second
       val ops = responses / ((end - start) / 1000)
@@ -446,7 +484,7 @@ CRDTKVStore {
           ("Total requests", "Total responses", "Total time (ms)"),
           (requests.toString, responses.toString, (end - start).toString)
         ),
-        s"evaluation/data/${ATOMIC_PROB}_atomic_performance_test.totals.csv"
+        s"evaluation/data/a$ATOMIC_PROB-p$PUT_PROB-b${BATCH_SIZE}_atomic_performance_test.totals.csv"
       )
 
       // Calculate average response time for puts
@@ -457,7 +495,7 @@ CRDTKVStore {
       // Prepare data for put requests
       Utils.writeToCsv(
         responseTimesDiffs,
-        s"evaluation/data/${ATOMIC_PROB}_atomic_performance_test.csv"
+        s"evaluation/data/a$ATOMIC_PROB-p$PUT_PROB-b${BATCH_SIZE}_atomic_performance_test.csv"
       )
     }
 
