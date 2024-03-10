@@ -23,9 +23,13 @@ CRDTKVStore {
     with AnyWordSpecLike {
 
   trait StoreSystem {
-    val TEST_TIME = 5000
-    val REQUEST_WAIT_NS = 50000 // 0.5 ms
+    // Configuration
+    val TEST_TIME = 60000
+    val REQUEST_WAIT_NS = 75000 // 0.75 ms
+    val REQUEST_WAIT_NS_VARIANCE = 25000 // 0.25 ms
     val N_ACTORS = 4
+
+    // Shared variable between threads, do not edit manually
     var TESTING = true
     implicit val context: ExecutionContextExecutor =
       ExecutionContext.fromExecutor(
@@ -309,8 +313,8 @@ CRDTKVStore {
 
     "mixed ops" in new StoreSystem {
       val PUT_PROB = 0.5
-      val ATOMIC_PROB = 0.5
-      val BATCH_SIZE = 5
+      val ATOMIC_PROB = 0
+      val BATCH_SIZE = 1
       // Utils.setLoggerLevel("INFO")
 
       // For each actor, create a thread sending writes and reads with equal frequency
@@ -371,11 +375,10 @@ CRDTKVStore {
             actorRef ! op
             j += 1
             val randSleep =
-              math
-                .round(
-                  Random.between(REQUEST_WAIT_NS * 0.8, REQUEST_WAIT_NS * 1.2)
-                )
-                .toInt
+              Random.between(
+                REQUEST_WAIT_NS - REQUEST_WAIT_NS_VARIANCE,
+                REQUEST_WAIT_NS + REQUEST_WAIT_NS_VARIANCE
+              )
             Thread.sleep(
               0,
               randSleep * BATCH_SIZE
