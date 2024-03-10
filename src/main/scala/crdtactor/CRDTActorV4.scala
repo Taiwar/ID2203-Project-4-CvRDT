@@ -113,12 +113,14 @@ object CRDTActorV4 {
   case class Leader(leader: ActorRef[Command]) extends Command
 
   // Failure detector
-  case object StartFailureDetector extends Command
+  case class StartFailureDetector(revived: Boolean) extends Command
 
   // Heartbeat
   case class Heartbeat(from: ActorRef[ActorFailureDetectorV2.Command], delay: Boolean) extends Command
 
   case class HeartbeatAck(from: ActorRef[Command]) extends Command
+
+  case class RequestToJoin(from: ActorRef[Command]) extends Command
 }
 
 import crdtactor.CRDTActorV4.*
@@ -495,19 +497,18 @@ class CRDTActorV4(
       from ! State(crdtstate)
       Behaviors.same
 
-    // For testing purposes
-    // TODO: Remove this
-    case StartFailureDetector =>
-      ctx.log.info(s"CRDTActor-$id: Starting failure detector")
+    // Start the failure detector for this actor
+    case StartFailureDetector(revived) =>
+      ctx.log.info(s"CRDTActor-$id: Starting failure detector for CRDTActor-$id")
       // Randomize the id of the failure detector
-      val fdId = r.nextInt(100) + id
+//      val fdId = r.nextInt(100) + id
 
       // Spawn the failure detector and give it a name
       failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetectorV2.Command] { ctx =>
-        Behaviors.withTimers(timers => new ActorFailureDetectorV2(fdId, ctx, timers))
-      }, s"failure-detector-${fdId.toString}")
+        Behaviors.withTimers(timers => new ActorFailureDetectorV2(id, ctx, timers))
+      }, s"failure-detector-${id.toString}")
 
-      failureDetector ! ActorFailureDetectorV2.Start(ctx.self)
+      failureDetector ! ActorFailureDetectorV2.Start(ctx.self, revived)
       Behaviors.same
 
     // Heartbeat handling
@@ -534,6 +535,13 @@ class CRDTActorV4(
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.MortalityNotice(actor)
       Behaviors.same
+
+
+    case RequestToJoin(from) =>
+      ctx.log.info(s"CRDTActor-$id: Received request to join from ${from.path.name}")
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetectorV2.JoinRequest(from)
+      Behaviors.stopped
 
     case Die =>
       context.log.info("Received PoisonPill, stopping...")
