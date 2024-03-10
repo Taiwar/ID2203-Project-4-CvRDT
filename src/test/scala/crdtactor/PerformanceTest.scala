@@ -24,7 +24,7 @@ CRDTKVStore {
 
   trait StoreSystem {
     // Configuration
-    val TEST_TIME = 60000
+    val TEST_TIME = 5000
     val REQUEST_WAIT_NS = 75000 // 0.75 ms
     val REQUEST_WAIT_NS_VARIANCE = 25000 // 0.25 ms
     val N_ACTORS = 4
@@ -313,7 +313,7 @@ CRDTKVStore {
 
     "mixed ops" in new StoreSystem {
       val PUT_PROB = 0.5
-      val ATOMIC_PROB = 0
+      val ATOMIC_PROB = 1
       val BATCH_SIZE = 1
       // Utils.setLoggerLevel("INFO")
 
@@ -344,7 +344,7 @@ CRDTKVStore {
             val op = if (it.next() <= ATOMIC_PROB) {
               // Generate BATCH_SIZE amount of inner ops
               val innerOps = (0 until BATCH_SIZE).map { k =>
-                val kOpId = s"$i - $j - $k"
+                val kOpId = s"$opId - $k"
                 if (it.next() <= PUT_PROB) {
                   puts += 1
                   requestTimes.put(kOpId, requestTime)
@@ -389,33 +389,37 @@ CRDTKVStore {
       }
 
       println("Building readers")
+      // Init responseTimeMap for each actor
+      val responseTimeMaps = (0 until N_ACTORS).map { _ =>
+        mutable.Map[String, Long]()
+      }
       // For each actor, create a thread reading from the thread probe
       val readers = (0 until N_ACTORS).map { i =>
         Future {
-          val responseTimes = mutable.Map[String, Long]()
+          val responseTimeMap = responseTimeMaps(i)
           while (TESTING) {
             probes(i).receiveMessage() match {
               case AtomicResponse(_, innerOps) =>
                 for ((_, op) <- innerOps) {
                   op match {
                     case PutResponse(opId, _) =>
-                      responseTimes.put(opId, System.currentTimeMillis())
+                      responseTimeMap.put(opId, System.currentTimeMillis())
                     case GetResponse(opId, _, _) =>
-                      responseTimes.put(opId, System.currentTimeMillis())
+                      responseTimeMap.put(opId, System.currentTimeMillis())
                     case m => println(s"Reader: Unexpected message $m")
                   }
                 }
               case PutResponse(opId, _) =>
-                responseTimes.put(opId, System.currentTimeMillis())
+                responseTimeMap.put(opId, System.currentTimeMillis())
               case GetResponse(opId, _, _) =>
-                responseTimes.put(opId, System.currentTimeMillis())
+                responseTimeMap.put(opId, System.currentTimeMillis())
               case m => println(s"Reader: Unexpected message $m")
             }
           }
-          responseTimes
+          responseTimeMap
         }.recover({ case e: Exception =>
           println(s"Reader: Error $e")
-          mutable.Map.empty[String, Long]
+          responseTimeMaps(i)
         })
       }
 
