@@ -76,7 +76,10 @@ object Utils {
         ThreadLocalRandom.current.nextLong()
       )
     )
-  def writeToCsv(data: Seq[(String, String, String | Long)], filename: String): Unit =
+  def writeToCsv(
+      data: Seq[(String, String, String | Long)],
+      filename: String
+  ): Unit =
     val rows = data.map(x => s"${x._1},${x._2},${x._3}")
     val csv = rows.mkString("\n")
     val file = new java.io.File(filename)
@@ -91,20 +94,21 @@ object Utils {
     // Sort by opId
     val responseTimesSorted = responseTimes.toSeq.sortBy(_._2)
     responseTimesSorted.map { case (opId, responseTime) =>
-      // Split opId into actorNr and opNr
-      val (actorNr, opNr) = opId.split(" - ") match
-        case Array(a, b) => (a, b)
-        case _           => ("", "")
+      // Split opId
+      val (actorNr, opNr, innerOpNr) = opId.split(" - ") match
+        case Array(a, b)    => (a, b, 0L)
+        case Array(a, b, c) => (a, b, c)
+        case _              => println(s"Unknown opId $opId"); ("", "", "")
       requestTimes.get(opId) match
         case None =>
           println(s"WARNING: No match for op $opId")
           (
             actorNr,
-            opNr,
+            opNr + "-" + innerOpNr,
             0L
           ) // This should not happen, but this hack would create a bias if it did
         case Some(requestTime) =>
-          (actorNr, opNr, responseTime - requestTime)
+          (actorNr, opNr + "-" + innerOpNr, responseTime - requestTime)
     }
   }
 

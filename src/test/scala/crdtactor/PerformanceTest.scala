@@ -10,6 +10,7 @@ import java.util.concurrent.Executors
 import scala.collection.mutable
 import scala.concurrent.*
 import scala.concurrent.duration.*
+import scala.util.Random
 
 class PerformanceTest
     extends ScalaTestWithActorTestKit("""
@@ -23,7 +24,7 @@ CRDTKVStore {
 
   trait StoreSystem {
     val TEST_TIME = 5000
-    val REQUEST_WAIT_NS = 5000 // 0.005 ms
+    val REQUEST_WAIT_NS = 50000 // 0.5 ms
     val N_ACTORS = 4
     var TESTING = true
     implicit val context: ExecutionContextExecutor =
@@ -309,7 +310,7 @@ CRDTKVStore {
     "mixed ops" in new StoreSystem {
       val PUT_PROB = 0.5
       val ATOMIC_PROB = 0.5
-      val BATCH_SIZE = 30
+      val BATCH_SIZE = 5
       // Utils.setLoggerLevel("INFO")
 
       // For each actor, create a thread sending writes and reads with equal frequency
@@ -341,15 +342,13 @@ CRDTKVStore {
               val innerOps = (0 until BATCH_SIZE).map { k =>
                 val kOpId = s"$i - $j - $k"
                 if (it.next() <= PUT_PROB) {
-                  val putKOpId = "p" + kOpId
                   puts += 1
-                  requestTimes.put(putKOpId, requestTime)
-                  Put(putKOpId, Utils.randomString(), j, probes(i).ref)
+                  requestTimes.put(kOpId, requestTime)
+                  Put(kOpId, Utils.randomString(), j, probes(i).ref)
                 } else {
-                  val getKOpId = "g" + kOpId
                   gets += 1
-                  requestTimes.put(getKOpId, requestTime)
-                  Get(getKOpId, Utils.randomString(), probes(i).ref)
+                  requestTimes.put(kOpId, requestTime)
+                  Get(kOpId, Utils.randomString(), probes(i).ref)
                 }
               }
               atomic += 1
@@ -371,9 +370,15 @@ CRDTKVStore {
 
             actorRef ! op
             j += 1
+            val randSleep =
+              math
+                .round(
+                  Random.between(REQUEST_WAIT_NS * 0.8, REQUEST_WAIT_NS * 1.2)
+                )
+                .toInt
             Thread.sleep(
               0,
-              REQUEST_WAIT_NS * BATCH_SIZE
+              randSleep * BATCH_SIZE
             ) // Assumption: Total amount of ops requests per second is the same
           }
           requestTimes
@@ -466,7 +471,7 @@ CRDTKVStore {
           ("Total requests", "Total responses", "Total time (ms)"),
           (requests.toString, responses.toString, (end - start).toString)
         ),
-        s"evaluation/data/${ATOMIC_PROB}_atomic_performance_test.totals.csv"
+        s"evaluation/data/a$ATOMIC_PROB-p$PUT_PROB-b${BATCH_SIZE}_atomic_performance_test.totals.csv"
       )
 
       // Calculate average response time for puts
@@ -477,7 +482,7 @@ CRDTKVStore {
       // Prepare data for put requests
       Utils.writeToCsv(
         responseTimesDiffs,
-        s"evaluation/data/${ATOMIC_PROB}_atomic_performance_test.csv"
+        s"evaluation/data/a$ATOMIC_PROB-p$PUT_PROB-b${BATCH_SIZE}_atomic_performance_test.csv"
       )
     }
 
