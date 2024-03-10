@@ -197,12 +197,6 @@ class CRDTActorV4(
       // If leader is replacing old one, we need to abort ongoing transactions
       if (leader.get != l)
         ctx.log.warn(s"CRDTActor-$id: Leader change detected")
-        // Clear pending transactions
-        pendingTransactionAgreement.clear()
-        pendingTransactions.clear()
-        // Unlock all locks
-        locks.clear()
-
         // If we're now leader, we need to abort ongoing atomic commands
         if (l == ctx.self)
           ctx.log.warn(s"CRDTActor-$id: I'm the new leader")
@@ -210,6 +204,11 @@ class CRDTActorV4(
           pendingTransactions.foreach { case (_, tx) =>
             tx.origin ! AtomicAbort(tx.opId)
           }
+        // Clear pending transactions
+        pendingTransactionAgreement.clear()
+        pendingTransactions.clear()
+        // Unlock all locks
+        locks.clear()
       leader = Some(l)
       Behaviors.same
 
