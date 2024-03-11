@@ -121,6 +121,8 @@ object CRDTActorV4 {
   case class HeartbeatAck(from: ActorRef[Command]) extends Command
 
   case class RequestToJoin(from: ActorRef[Command]) extends Command
+  
+  case class GetAliveActors(from: ActorRef[ActorFailureDetectorV2.Command]) extends Command
 }
 
 import crdtactor.CRDTActorV4.*
@@ -500,8 +502,6 @@ class CRDTActorV4(
     // Start the failure detector for this actor
     case StartFailureDetector(revived) =>
       ctx.log.info(s"CRDTActor-$id: Starting failure detector for CRDTActor-$id")
-      // Randomize the id of the failure detector
-//      val fdId = r.nextInt(100) + id
 
       // Spawn the failure detector and give it a name
       failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetectorV2.Command] { ctx =>
@@ -542,6 +542,12 @@ class CRDTActorV4(
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.JoinRequest(from)
       Behaviors.stopped
+
+    case GetAliveActors(from) =>
+      ctx.log.info(s"CRDTActor-$id: Received request to get alive actors from ${from.path.name}")
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetectorV2.GetAliveActors(from)
+      Behaviors.same
 
     case Die =>
       context.log.info("Received PoisonPill, stopping...")
