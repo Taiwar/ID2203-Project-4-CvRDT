@@ -24,6 +24,8 @@ object ActorFailureDetectorV2 {
   // GetIdResponse
   case class GetIdResponse(id: Int) extends Command
 
+  case class AliveActorsResponse(aliveActors: Map[Int, Boolean]) extends Command
+
   // Key-Value Ops
 
   // Timeout
@@ -156,11 +158,26 @@ class ActorFailureDetectorV2(
       // Start the failure detector timer
       startFailureDetectorTimer()
 
-      // Setup ids for all actors
-      for ((actorId, actor) <- others) {
-        // Add actor to the aliveActors map
-        aliveActors += (actorId -> true)
+      // If the actor is revived, get latest aliveActors from the leader
+
+      if (revived) {
+        // TODO: Actually get the leader
+        // Get the latest aliveActors from the leader
+        others.get(0) match {
+          case Some(leader: ActorRef[CRDTActorV4]) =>
+            // Update the aliveActors map
+            leader ! CRDTActorV4.GetAliveActors(ctx.self)
+          case _ =>
+            ctx.log.info(s"FailureDetector-$id: No aliveActors found")
+        }
+      } else {
+        // Setup ids for all actors
+        for ((actorId, actor) <- others) {
+          // Add actor to the aliveActors map
+          aliveActors += (actorId -> true)
+        }
       }
+
       Behaviors.same
 
     // TODO: Remove this if not needed
