@@ -24,7 +24,7 @@ object ActorFailureDetectorV2 {
   // GetIdResponse
   case class GetIdResponse(id: Int) extends Command
 
-  case class AliveActorsResponse(aliveActors: Map[Int, Boolean]) extends Command
+  private case class AliveActorsResponse(aliveActors: Map[Int, Boolean]) extends Command
 
   // Key-Value Ops
 
@@ -39,6 +39,8 @@ object ActorFailureDetectorV2 {
 
   // Join
   case class JoinRequest(newActor: ActorRef[CRDTActorV4.Command]) extends Command
+
+  case class GetAliveActors(from: ActorRef[Command]) extends Command
 
   // Time
 
@@ -139,38 +141,42 @@ class ActorFailureDetectorV2(
     case Start(from, revived) =>
       ctx.log.info(s"FailureDetector-$id started by ${from.path.name}")
 
+      // Refresh the actor references from the global state
       refreshOthers()
 
-      // If the actor is revived, inform all other actors
+      // If the actor is revived, get latest aliveActors from the leader
       if (revived) {
+        // Send Request to join to the actors
         for (actor <- others.keys) {
+          ctx.log.info(s"FailureDetector-$id: Sending RequestToJoin to actor $actor")
           // Get the actor from the 'others' map
           others.get(actor) match {
             case Some(actor: ActorRef[CRDTActorV4.Command]) =>
-              // Send Heartbeat to the actor
+              // Send Request to join to the actor
               actor ! CRDTActorV4.RequestToJoin(from)
             case _ =>
               ctx.log.info(s"FailureDetector-$id: Actor not found")
           }
         }
-      }
 
-      // Start the failure detector timer
-      startFailureDetectorTimer()
-
-      // If the actor is revived, get latest aliveActors from the leader
-
-      if (revived) {
         // TODO: Actually get the leader
         // Get the latest aliveActors from the leader
         others.get(0) match {
-          case Some(leader: ActorRef[CRDTActorV4]) =>
+          case Some(actor: ActorRef[CRDTActorV4]) =>
+            // Cast the leader to the correct type
+            val leader = actor.asInstanceOf[ActorRef[CRDTActorV4.Command]]
+
+            ctx.log.info(s"FailureDetector-$id: Found Leader: ${leader.path.name}")
+
             // Update the aliveActors map
             leader ! CRDTActorV4.GetAliveActors(ctx.self)
           case _ =>
-            ctx.log.info(s"FailureDetector-$id: No aliveActors found")
+            ctx.log.info(s"FailureDetector-$id: No Leader found")
         }
       } else {
+        // Start the failure detector timer
+        startFailureDetectorTimer()
+
         // Setup ids for all actors
         for ((actorId, actor) <- others) {
           // Add actor to the aliveActors map
@@ -293,6 +299,36 @@ class ActorFailureDetectorV2(
         case None =>
           ctx.log.info(s"FailureDetector-$id: Actor not found")
       }
+      Behaviors.same
+
+    // Update the aliveActors map with the latest aliveActors from the leader
+    case AliveActorsResponse(aliveActors) =>
+      ctx.log.info(s"FailureDetector-$id: Received AliveActorsResponse")
+
+      aliveActors match
+        case map: Map[Int, Boolean] =>
+
+          // Update the aliveActors map
+          this.aliveActors ++= aliveActors
+
+          // Remove our own id from the map
+          this.aliveActors -= id
+
+          ctx.log.info(s"FailureDetector-$id: Get new AliveActors from the leader: $aliveActors")
+
+      // Start the failure detector timer
+      startFailureDetectorTimer()
+
+      Behaviors.same
+
+    case GetAliveActors(from) =>
+      ctx.log.info(s"FailureDetector-$id: Received GetAliveActors")
+
+      // Add sender to the aliveActors map
+      aliveActors += (id -> true)
+
+      // Send the aliveActors to the failure detector from the actor
+      from ! AliveActorsResponse(aliveActors.toMap)
 
       Behaviors.same
 
