@@ -250,6 +250,8 @@ class CRDTActorV4(
         // If we're now leader, we need to abort ongoing atomic commands
         if (l == ctx.self)
           ctx.log.warn(s"CRDTActor-$id: I'm the new leader")
+
+          debugMsg(s"Leader-$id: Aborting ongoing atomic commands due to leader change ($pendingTransactionRefs)")
           // Send abort to all atomic commands in pendingTransactionRefs
           pendingTransactionRefs.foreach { case (opId, origin) =>
             origin ! AtomicAbort(opId)
@@ -397,6 +399,8 @@ class CRDTActorV4(
             ("unknown", UnknownCommandResponse())
         }
         transactionWorking = false
+
+        debugMsg(s"Leader-$id: Executed transaction $timestamp with pendingTransactionRefs $pendingTransactionRefs")
 
         // Remove transaction from pending
         pendingTransactionAgreement -= timestamp
@@ -563,12 +567,36 @@ class CRDTActorV4(
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.MortalityNotice(actor)
 
-      // If actor is the leader, we need to start a new election
+      // If actor is/was the leader, we need to find a new leader
+      // (Make next actor the leader)
       if (leader.isDefined && leader.get == actor) {
-        debugFD(s"CRDTActor-$id: Leader has stopped responding, starting new election")
-        leader = None
+        debugFD(s"CRDTActor-$id: Leader has died, finding new leader")
+
+        // Get id of the previous leader
+        val previousLeaderId = everyone.find(_._2 == actor).get._1
+
+        // Get the next leader
+        // TODO: Find safer way to get next leader
+        val nextLeader = everyone.find(_._1 > previousLeaderId + 1)
+
+        if (nextLeader.isDefined) {
+          debugFD(s"CRDTActor-$id: New leader is ${nextLeader.get._2.path.name}")
+
+          everyone.foreach { (_, actorRef) =>
+            if (actorRef != actor) {
+              actorRef ! Leader(nextLeader.get._2)
+            }
+          }
+        }
+      } // If im the leader, we need to abort ongoing transactions instead
+      else if (leader.isDefined && leader.get == ctx.self) {
+        debugFD(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions")
+
+        // Send abort message to all actors except the dead one
         everyone.foreach { (_, actorRef) =>
-          actorRef ! Leader(ctx.self)
+          if (actorRef != actor) {
+            actorRef ! AbortAtomicOperations()
+          }
         }
       }
 
