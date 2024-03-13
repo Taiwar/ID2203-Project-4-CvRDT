@@ -88,7 +88,8 @@ object CRDTActorV4 {
   private case class Prepare(
       timestamp: (Int, Int),
       keys: Iterable[String],
-      from: ActorRef[Command]
+      from: ActorRef[Command],
+      ref: (String, ActorRef[Command])
   ) extends Command
 
   // Combines lock gathering and sync
@@ -100,7 +101,8 @@ object CRDTActorV4 {
 
   private case class Commit(
       timestamp: (Int, Int),
-      from: ActorRef[Command]
+      from: ActorRef[Command],
+      opId: String
   ) extends Command
 
   private case object Timeout extends ControlMessage with Command
@@ -141,7 +143,9 @@ class CRDTActorV4(
   private var time = (id, 0)
   private val pendingTransactionLocks =
     mutable.Map[(Int, Int), Iterable[String]]()
-
+  // Track ongoing transactions in case of leader failure
+  private val pendingTransactionRefs =
+    mutable.Map[String, ActorRef[Command]]()
   private val locks = mutable.Map[String, Int]()
   private val commandBuffer = mutable.Queue[Command]()
   private val atomicCommandBuffer = mutable.Queue[Command]()
@@ -213,13 +217,14 @@ class CRDTActorV4(
         // If we're now leader, we need to abort ongoing atomic commands
         if (l == ctx.self)
           ctx.log.warn(s"CRDTActor-$id: I'm the new leader")
-          // Send abort to all atomic commands in pendingTransactions
-          pendingTransactions.foreach { case (_, tx) =>
-            tx.origin ! AtomicAbort(tx.opId)
+          // Send abort to all atomic commands in pendingTransactionRefs
+          pendingTransactionRefs.foreach { case (opId, origin) =>
+            origin ! AtomicAbort(opId)
           }
         // Clear pending transactions
         pendingTransactionAgreement.clear()
         pendingTransactions.clear()
+        pendingTransactionRefs.clear()
         // Unlock all locks
         locks.clear()
       leader = Some(l)
@@ -247,7 +252,6 @@ class CRDTActorV4(
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing PUT $key -> $value")
-      // TODO: Could we use a logical clock and avoid the need for synchronized clocks?
       crdtstate = crdtstate.put(selfNode, key, value)
       dirty = true
       ctx.log.debug(s"CRDTActor-$id: CRDT state: $crdtstate")
@@ -290,7 +294,7 @@ class CRDTActorV4(
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
       Behaviors.same
 
-    case Prepare(timestamp, keys, from) =>
+    case Prepare(timestamp, keys, from, (opId, origin)) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming Prepare operation $timestamp")
       // Only respond if source is leader
       if (leader.isEmpty || leader.get != from) {
@@ -299,6 +303,7 @@ class CRDTActorV4(
       }
 
       pendingTransactionLocks += (timestamp -> keys)
+      pendingTransactionRefs += (opId -> origin)
       keys.foreach { key =>
         locks(key) = 1
       }
@@ -324,7 +329,6 @@ class CRDTActorV4(
         case None => ()
 
       // If we got all responses, commit
-      // TODO: See if a majority would also suffice
       if (pendingTransactionAgreement(timestamp) == others.size) {
         ctx.log.info(
           s"Leader-$id: All locks acquired for transaction $timestamp"
@@ -362,19 +366,20 @@ class CRDTActorV4(
         // Remove transaction from pending
         pendingTransactionAgreement -= timestamp
         pendingTransactions -= timestamp
+        pendingTransactionRefs -= tx.opId
 
         // Respond to client
         tx.origin ! AtomicResponse(tx.opId, responses)
 
         // Send commit to all others to unlock keys
         everyone.foreach { (_, actorRef) =>
-          actorRef ! DelayedMessage(Commit(timestamp, ctx.self))
+          actorRef ! DelayedMessage(Commit(timestamp, ctx.self, tx.opId))
         }
       }
       Behaviors.same
 
     // Handle commit
-    case Commit(timestamp, from) =>
+    case Commit(timestamp, from, opId) =>
       ctx.log.debug(s"CRDTActor-$id: Consuming Commit operation $timestamp")
       if (leader.isEmpty || leader.get != from) {
         ctx.log.warn(s"CRDTActor-$id: Not leader")
@@ -386,7 +391,9 @@ class CRDTActorV4(
       keys.foreach { key =>
         locks(key) = 0
       }
+      // Remove transaction from pending
       pendingTransactionLocks -= timestamp
+      pendingTransactionRefs -= opId
 
       // Work through and empty buffer
       ctx.log.debug(s"CRDTActor-$id: Executing buffered commands")
@@ -464,10 +471,13 @@ class CRDTActorV4(
       keys.foreach { key =>
         locks(key) = 1
       }
+      pendingTransactionRefs += (opId -> origin)
 
       // Send prepare to others
       others.foreach { (_, actorRef) =>
-        actorRef ! DelayedMessage(Prepare(timestamp, keys, ctx.self))
+        actorRef ! DelayedMessage(
+          Prepare(timestamp, keys, ctx.self, (opId, origin))
+        )
       }
       Behaviors.same
 
