@@ -123,7 +123,7 @@ object CRDTActorV4 {
   case class HeartbeatAck(from: ActorRef[Command]) extends Command
 
   case class RequestToJoin(from: ActorRef[Command]) extends Command
-  
+
   case class GetAliveActors(from: ActorRef[ActorFailureDetectorV2.Command]) extends Command
 }
 
@@ -185,6 +185,15 @@ class CRDTActorV4(
   Timeout,
   Utils.CRDT_SYNC_PERIOD.milliseconds
   )
+
+  // Print debug messages
+  private def debugMsg(msg: String) = {
+    context.log.info(s"CRDTActor-$id: $msg")
+  }
+
+  private def debugFD(msg: String) = {
+//    context.log.info(s"CRDTActor-$id: $msg")
+  }
 
 
   // Note: you probably want to modify this method to be more efficient
@@ -263,7 +272,7 @@ class CRDTActorV4(
       broadcastAndResetDeltas()
       // Print if leader
       if (leader.isDefined && leader.get == ctx.self) {
-        ctx.log.info(s"Leader-$id: Sending delta")
+        debugMsg(s"Leader-$id: Sending delta")
       }
       Behaviors.same
 
@@ -274,6 +283,8 @@ class CRDTActorV4(
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing PUT $key -> $value")
+
+      // TODO: Could we use a logical clock and avoid the need for synchronized clocks?
       crdtstate = crdtstate.put(selfNode, key, value)
       dirty = true
       ctx.log.debug(s"CRDTActor-$id: CRDT state: $crdtstate")
@@ -352,7 +363,7 @@ class CRDTActorV4(
 
       // If we got all responses, commit
       if (pendingTransactionAgreement(timestamp) == others.size) {
-        ctx.log.info(
+        debugMsg(
           s"Leader-$id: All locks acquired for transaction $timestamp"
         )
         // Get commands from pending transactions
@@ -477,7 +488,7 @@ class CRDTActorV4(
       time = (time._1, time._2 + 1)
       val timestamp = time
 
-      ctx.log.info(s"Leader-$id: Starting transaction $timestamp")
+      debugMsg(s"Leader-$id: Starting transaction $timestamp")
 
       // Add new transaction to transactions
       pendingTransactionAgreement += (timestamp -> 0)
@@ -511,7 +522,7 @@ class CRDTActorV4(
 
     // Start the failure detector for this actor
     case StartFailureDetector(revived) =>
-      ctx.log.info(s"CRDTActor-$id: Starting failure detector for CRDTActor-$id")
+      debugFD(s"CRDTActor-$id: Starting failure detector for CRDTActor-$id")
 
       // Spawn the failure detector and give it a name
       failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetectorV2.Command] { ctx =>
@@ -523,13 +534,14 @@ class CRDTActorV4(
 
     // Heartbeat handling
     case Heartbeat(from, delay) =>
-      ctx.log.info(s"CRDTActor-$id: Received heartbeat")
+      debugFD(s"CRDTActor-$id: Received heartbeat")
 
       if (delay) {
         ctx.log.info(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
+        debugFD(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
         ctx.scheduleOnce(600.millis, ctx.self, Heartbeat(from, false))
       } else {
-        ctx.log.info(s"CRDTActor-$id: Sending heartbeat ack to ${from.path.name}")
+        debugFD(s"CRDTActor-$id: Sending heartbeat ack to ${from.path.name}")
         // Send ack back to the sender
         from ! ActorFailureDetectorV2.HeartbeatAck(ctx.self)
       }
@@ -537,24 +549,25 @@ class CRDTActorV4(
       Behaviors.same
 
     case HeartbeatAck(from) =>
-      ctx.log.info(s"CRDTActor-$id: Received heartbeat ack")
+      debugFD(s"CRDTActor-$id: Received heartbeat ack")
       Behaviors.same
 
     case MortalityNotice(actor) =>
-      ctx.log.info(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
+      debugFD(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
+
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.MortalityNotice(actor)
       Behaviors.same
 
 
     case RequestToJoin(from) =>
-      ctx.log.info(s"CRDTActor-$id: Received request to join from ${from.path.name}")
+      debugFD(s"CRDTActor-$id: Received request to join from ${from.path.name}")
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.JoinRequest(from)
       Behaviors.stopped
 
     case GetAliveActors(from) =>
-      ctx.log.info(s"CRDTActor-$id: Received request to get alive actors from ${from.path.name}")
+      debugFD(s"CRDTActor-$id: Received request to get alive actors from ${from.path.name}")
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.GetAliveActors(from)
       Behaviors.same
