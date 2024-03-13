@@ -30,7 +30,19 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     // Set leader (BLE mock)
     actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.Leader(actors(0)))
 
-    Thread.sleep(50) // Wait for actors to be ready
+    // Start the failure detector
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.StartFailureDetector(false))
+
+    // Spawn a supervisor for each actor
+    val supervisors = (0 until N_ACTORS).map { i =>
+      // Spawn the actor and get its reference (address)
+      val supervisorRef = spawn(Behaviors.setup[ActorSupervisorV1.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorSupervisorV1(i + 100, ctx, timers))
+      })
+      i + 100 -> supervisorRef
+    }.toMap
+
+    Thread.sleep(100) // Wait for actors to be ready
 
     val probe: TestProbe[Command] = createTestProbe[Command]()
   }
@@ -142,6 +154,94 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         ),
         probe.ref
       )
+      probe.receiveMessage() match {
+        case AtomicResponse(_, _) =>
+        // Do nothing
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
+
+      // Actor 1 reads values of a and b
+      actors(1) ! Get("test", "a", probe.ref)
+      val a1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(1) ! Get("test", "b", probe.ref)
+      val b1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 1: a1: $a1, b1: $b1"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a1.get == 150 && b1.get == 150) || (a1.get != 150 && b1.get != 150) shouldEqual true
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+      // Eventually, actor 2 reads new values of a and b
+      actors(2) ! Get("test", "a", probe.ref)
+      val a2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(2) ! Get("test", "b", probe.ref)
+      val b2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 2: a2: $a2, b2: $b2"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a2.get == 150 && b2.get == 150) shouldEqual true
+    }
+
+    "have sequentially consistent state after atomic actions with failing nodes" in new StoreSystem {
+      // Simulate a bank transfer
+
+      // Set up
+      actors(0) ! Put("test", "a", 100, probe.ref)
+      actors(0) ! Put("test", "b", 200, probe.ref)
+      probe.receiveMessage()
+      probe.receiveMessage()
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 0 reads value of a and b
+      actors(0) ! Atomic(
+        "test",
+        Array(Get("test", "a", probe.ref), Get("test", "b", probe.ref)),
+        probe.ref
+      )
+
+      // Kill one actor
+      actors(3) ! CRDTActorV4.Die
+
+      // Collect all responses of the atomic abort
+      val atomicAbortResponses = (0 until N_ACTORS - 1).map(_ => probe.receiveMessage())
+
+      // the size of the responses should be N_ACTORS - 1
+      atomicAbortResponses.size shouldEqual (N_ACTORS - 1)
+
+      println(atomicAbortResponses)
+
+      val results =
+        probe.receiveMessage().asInstanceOf[AtomicResponse].responses
+      // Get tuple where first element is the key and second is the value
+      val a = results.find(_._1 == "a").get._2.asInstanceOf[GetResponse].value
+      val b = results.find(_._1 == "b").get._2.asInstanceOf[GetResponse].value
+
+      // Actor 0 deducts 50 from b and adds 50 to a
+      actors(0) ! Atomic(
+        "test",
+        Array(
+          Put("test", "b", b.get - 50, probe.ref),
+          Put("test", "a", a.get + 50, probe.ref)
+        ),
+        probe.ref
+      )
+
+//      probe.receiveMessage() match {
+//        case AtomicAbort(opId) =>
+//          println(s"Atomic action aborted: $opId")
+//        case msg =>
+//          fail("Unexpected message: " + msg)
+//      }
+
       probe.receiveMessage() match {
         case AtomicResponse(_, _) =>
         // Do nothing
