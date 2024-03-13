@@ -520,6 +520,10 @@ class CRDTActorV4(
       from ! State(crdtstate)
       Behaviors.same
 
+//    case AtomicAbortAtomicAbort(opId) =>
+//      ctx.log.debug(s"CRDTActor-$id: Consuming atomic abort operation")
+//      Behaviors.same
+
     // Start the failure detector for this actor
     case StartFailureDetector(revived) =>
       debugFD(s"CRDTActor-$id: Starting failure detector for CRDTActor-$id")
@@ -537,7 +541,6 @@ class CRDTActorV4(
       debugFD(s"CRDTActor-$id: Received heartbeat")
 
       if (delay) {
-        ctx.log.info(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
         debugFD(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
         ctx.scheduleOnce(600.millis, ctx.self, Heartbeat(from, false))
       } else {
@@ -557,6 +560,16 @@ class CRDTActorV4(
 
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.MortalityNotice(actor)
+
+      // If actor is the leader, we need to start a new election
+      if (leader.isDefined && leader.get == actor) {
+        debugFD(s"CRDTActor-$id: Leader has stopped responding, starting new election")
+        leader = None
+        everyone.foreach { (_, actorRef) =>
+          actorRef ! Leader(ctx.self)
+        }
+      }
+
       Behaviors.same
 
 
