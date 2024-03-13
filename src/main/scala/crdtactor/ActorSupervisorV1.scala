@@ -9,13 +9,15 @@ object ActorSupervisorV1 {
   // Define the commands for the supervisor
   sealed trait Command
   case class createActor() extends Command
+
+  case class killActor() extends Command
 }
 
 class ActorSupervisorV1(
                         id : Int,
-                        cxt: ActorContext[ActorSupervisorV1.Command],
+                        ctx: ActorContext[ActorSupervisorV1.Command],
                         timers: TimerScheduler[ActorSupervisorV1.Command]
-                       ) extends AbstractBehavior[ActorSupervisorV1.Command](cxt) {
+                       ) extends AbstractBehavior[ActorSupervisorV1.Command](ctx) {
   import ActorSupervisorV1._
 
   private var childActor: ActorRef[CRDTActorV4.Command] = _
@@ -27,10 +29,10 @@ class ActorSupervisorV1(
 
   // TODO: Add actual state transfer
   private def createActor(): ActorRef[CRDTActorV4.Command] = {
-    cxt.log.info("Creating a new actor...")
+    ctx.log.info("Creating a new actor...")
     val actor = context.spawn(Behaviors.setup[CRDTActorV4.Command] { ctx =>
       Behaviors.withTimers(timers => new CRDTActorV4(id, ctx, timers))
-    }, "childActor")
+    }, "CHILDACTOR")
     startActor(actor)
     context.watch(actor)
     actor
@@ -49,9 +51,22 @@ class ActorSupervisorV1(
     actor ! CRDTActorV4.StartFailureDetector(true)
   }
 
+  private def killActor(): Unit = {
+    ctx.log.info("Killing the actor...!!!!!1")
+    // Stop the failure detector
+    childActor ! CRDTActorV4.Die
+
+    // Remove actor addresses from the global state with id (same as supervisor id)
+    Utils.GLOBAL_STATE.remove(id)
+  }
+
   override def onMessage(msg: Command): Behavior[Command] = msg match {
     case createActor() =>
       childActor = createActor()
+      Behaviors.same
+
+    case killActor() =>
+      killActor()
       Behaviors.same
   }
 
