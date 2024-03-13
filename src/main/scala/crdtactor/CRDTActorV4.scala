@@ -66,6 +66,8 @@ object CRDTActorV4 {
   case object Die extends Command
   case class AtomicAbort(opId: String) extends Indication
 
+  case class AbortAtomicOperations() extends Command
+
   // Error responses
 
   case class UnknownCommandResponse() extends Indication
@@ -572,6 +574,22 @@ class CRDTActorV4(
 
       Behaviors.same
 
+    case AbortAtomicOperations() =>
+      debugFD(s"CRDTActor-$id: Received atomic abort, clearing locks/transactions/refs")
+
+      // Send abort to all atomic commands in pendingTransactionRefs
+      pendingTransactionRefs.foreach { case (opId, origin) =>
+        origin ! AtomicAbort(opId)
+      }
+
+      // Clear pending transactions
+      pendingTransactionAgreement.clear()
+      pendingTransactions.clear()
+      pendingTransactionRefs.clear()
+      // Unlock all locks
+      locks.clear()
+
+      Behaviors.same
 
     case RequestToJoin(from) =>
       debugFD(s"CRDTActor-$id: Received request to join from ${from.path.name}")
