@@ -500,4 +500,111 @@ CRDTKVStore {
     }
 
   }
+
+  "mixed ops (fixed workload)" in new StoreSystem {
+    val PUT_PROB = 0.5
+    val ATOMIC_PROB = 0
+    val BATCH_SIZE = 20
+    val OPS = 50000
+    // Utils.setLoggerLevel("INFO")
+
+    val workingProbe = createTestProbe[Command]()
+    // Build workload
+    val workload = (0 until OPS).map { i =>
+      val opId = s"$i"
+      val op = if (math.random <= ATOMIC_PROB) {
+        // Generate BATCH_SIZE amount of inner ops
+        val innerOps = (0 until BATCH_SIZE).map { k =>
+          val kOpId = s"$opId - $k"
+          if (math.random <= PUT_PROB) {
+            Put(kOpId, Utils.randomString(), i, workingProbe.ref)
+          } else {
+            Get(kOpId, Utils.randomString(), workingProbe.ref)
+          }
+        }
+        Atomic(
+          opId,
+          innerOps,
+          workingProbe.ref
+        )
+      } else {
+        if (math.random <= PUT_PROB) {
+          Put(opId, Utils.randomString(), i, workingProbe.ref)
+        } else {
+          Get(opId, Utils.randomString(), workingProbe.ref)
+        }
+      }
+      op
+    }
+
+    // Get current time
+    val start = System.currentTimeMillis()
+
+    // Work through workload by sending and waiting for each response
+    var i = 0
+    val requestTimes = mutable.Map[String, Long]()
+    val responseTimes = mutable.Map[String, Long]()
+    while (i < OPS) {
+      // Print progress every 5%
+      if (i % (OPS / 20) == 0) {
+        println(s"Progress: ${i / (OPS / 100)}%")
+      }
+
+      requestTimes.put(i.toString, System.currentTimeMillis())
+      actors(i % N_ACTORS) ! workload(i)
+      // Wait for response
+      workingProbe.receiveMessage() match {
+        case AtomicResponse(_, innerOps) =>
+          for ((_, op) <- innerOps) {
+            op match {
+              case PutResponse(opId, _) =>
+                responseTimes.put(opId, System.currentTimeMillis())
+              case GetResponse(opId, _, _) =>
+                responseTimes.put(opId, System.currentTimeMillis())
+              case m => println(s"Reader: Unexpected message $m")
+            }
+          }
+        case PutResponse(opId, _) =>
+          responseTimes.put(opId, System.currentTimeMillis())
+        case GetResponse(opId, _, _) =>
+          responseTimes.put(opId, System.currentTimeMillis())
+        case m => println(s"Reader: Unexpected message $m")
+      }
+      i += 1
+    }
+    val end = System.currentTimeMillis()
+
+    // Log total time and response count
+    val requests = requestTimes.size
+    val responses = responseTimes.size
+
+    println(s"Total time: ${end - start} ms")
+    println(s"Total requests: $requests")
+    println(s"Total responses: $responses")
+    println(s"Total unmatched requests: ${requests - responses}")
+    // Calculate average ops per second
+    val ops = responses / ((end - start) / 1000).max(1)
+    println(s"Average ops per second: $ops")
+
+    // Write total responses and time to file
+    Utils.writeToCsv(
+      Seq(
+        ("Total requests", "Total responses", "Total time (ms)"),
+        (requests.toString, responses.toString, (end - start).toString)
+      ),
+      s"evaluation/data/a$ATOMIC_PROB-p$PUT_PROB-b${BATCH_SIZE}_atomic_performance_test.$OPS.totals.csv"
+    )
+
+    // Calculate average response time for puts
+    val responseTimesDiffs: Seq[(String, String, Long)] =
+      Utils.calculateResponseTimesDiffs(responseTimes, requestTimes)
+    Utils.printStats(s"$ATOMIC_PROB Atomic", responseTimesDiffs.map(_._3))
+
+    // Prepare data for put requests
+    Utils.writeToCsv(
+      responseTimesDiffs,
+      s"evaluation/data/a$ATOMIC_PROB-p$PUT_PROB-b${BATCH_SIZE}_atomic_performance_test.$OPS.csv"
+    )
+  }
+
 }

@@ -96,6 +96,7 @@ object Utils {
     responseTimesSorted.map { case (opId, responseTime) =>
       // Split opId
       val (actorNr, opNr, innerOpNr) = opId.split(" - ") match
+        case Array(a)       => ("0", a, 0L)
         case Array(a, b)    => (a, b, 0L)
         case Array(a, b, c) => (a, b, c)
         case _              => println(s"Unknown opId $opId"); ("", "", "")
