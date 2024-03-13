@@ -10,6 +10,7 @@ import scala.concurrent.duration.DurationInt
 import scala.util.Random
 
 object ActorFailureDetectorV2 {
+
   // The type of messages that the actor can handle
   sealed trait Command
 
@@ -24,12 +25,12 @@ object ActorFailureDetectorV2 {
   // GetIdResponse
   case class GetIdResponse(id: Int) extends Command
 
-  private case class AliveActorsResponse(aliveActors: Map[Int, Boolean]) extends Command
-
   // Key-Value Ops
 
+  private case class AliveActorsResponse(aliveActors: Map[Int, Boolean]) extends Command
   // Timeout
   case class Timeout(actorId: Int) extends Command
+
   private case object TimerKey
 
   // Heartbeat
@@ -41,6 +42,8 @@ object ActorFailureDetectorV2 {
   case class JoinRequest(newActor: ActorRef[CRDTActorV4.Command]) extends Command
 
   case class GetAliveActors(from: ActorRef[Command]) extends Command
+
+  case object StartFD extends Command
 
   // Time
 
@@ -58,7 +61,7 @@ object ActorFailureDetectorV2 {
   val T = gamma + delta
 
   // The sender of the start message (actor reference)
-  var messageSender: Option[ActorRef[CRDTActorV4.Command]] = None
+  var mainActor: Option[ActorRef[CRDTActorV4.Command]] = None
 
   // Add a flag to indicate whether the Timeout message should be processed
   private var processTimeout = true
@@ -141,38 +144,25 @@ class ActorFailureDetectorV2(
     case Start(from, revived) =>
       ctx.log.info(s"FailureDetector-$id started by ${from.path.name}")
 
+      // Store the sender of the start message
+      mainActor = Some(from)
+
       // Refresh the actor references from the global state
       refreshOthers()
 
       // If the actor is revived, get latest aliveActors from the leader
       if (revived) {
-        // Send Request to join to the actors
-        for (actor <- others.keys) {
-          ctx.log.info(s"FailureDetector-$id: Sending RequestToJoin to actor $actor")
-          // Get the actor from the 'others' map
-          others.get(actor) match {
-            case Some(actor: ActorRef[CRDTActorV4.Command]) =>
-              // Send Request to join to the actor
-              actor ! CRDTActorV4.RequestToJoin(from)
-            case _ =>
-              ctx.log.info(s"FailureDetector-$id: Actor not found")
-          }
-        }
-
         // TODO: Actually get the leader
         // Get the latest aliveActors from the leader
         others.get(0) match {
-          case Some(actor: ActorRef[CRDTActorV4]) =>
-            // Cast the leader to the correct type
-            val leader = actor.asInstanceOf[ActorRef[CRDTActorV4.Command]]
-
-            ctx.log.info(s"FailureDetector-$id: Found Leader: ${leader.path.name}")
-
-            // Update the aliveActors map
-            leader ! CRDTActorV4.GetAliveActors(ctx.self)
+          case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+            ctx.log.info(s"FailureDetector-$id: Sending GetAliveActors to actor ${actor.path.name}")
+            actor ! CRDTActorV4.GetAliveActors(ctx.self)
+//            ctx.scheduleOnce(1000.millis, actor, CRDTActorV4.GetAliveActors(ctx.self))
           case _ =>
-            ctx.log.info(s"FailureDetector-$id: No Leader found")
+            ctx.log.info(s"FailureDetector-$id: No actors found in 'others' map")
         }
+
       } else {
         // Start the failure detector timer
         startFailureDetectorTimer()
@@ -234,6 +224,17 @@ class ActorFailureDetectorV2(
 
       ctx.log.info(s"FailureDetector-$id: AliveActors: $aliveActors")
 
+      // TODO: Check if needed
+      // Update the others map
+      refreshOthers()
+
+      for ((actorId, actor) <- others) {
+        if (!aliveActors.contains(actorId)) {
+          // Add actor to the aliveActors map
+          aliveActors += (actorId -> true)
+        }
+      }
+
       // Send the heartbeat to all other actors
       for (actorId <- aliveActors.keys if aliveActors(actorId)) {
         // Get the actor from the 'others' map
@@ -249,7 +250,7 @@ class ActorFailureDetectorV2(
 
     // Handle HeartbeatAck from CRDTActorV4
     case HeartbeatAck(from) =>
-      ctx.log.info(s"FailureDetector-$id: Received heartbeat ack")
+      ctx.log.info(s"FailureDetector-$id: Received heartbeat ack from ${from.path.name}")
 
       // Filter the actor from the others
       others.find(_._2 == from) match {
@@ -263,7 +264,7 @@ class ActorFailureDetectorV2(
           // Restart timemout timer
           startTimeoutTimer(actorId)
         case None =>
-          ctx.log.info(s"FailureDetector-$id: Actor not found")
+          ctx.log.info(s"FailureDetector-$id: Actor not found while handling HeartbeatAck")
       }
 
       Behaviors.same
@@ -316,20 +317,44 @@ class ActorFailureDetectorV2(
 
           ctx.log.info(s"FailureDetector-$id: Get new AliveActors from the leader: $aliveActors")
 
-      // Start the failure detector timer
-      startFailureDetectorTimer()
+      // After updating the aliveActors map, send join requests to the actors that are alive
+      for (actorId <- aliveActors.keys if aliveActors(actorId)) {
+        // Get the actor from the 'others' map
+        others.get(actorId) match {
+          case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+            // Send JoinRequest to the actor
+//            actor ! CRDTActorV4.RequestToJoin(mainActor.get)
+          case _ =>
+            // Skip the actor if it is not found or not of the correct type
+            ctx.log.info(s"FailureDetector-$id: Actor not found")
+        }
+      }
+
+      // Wait a little bit before starting the failure detector timer
+      ctx.scheduleOnce(800.millis, ctx.self, StartFD)
 
       Behaviors.same
 
     case GetAliveActors(from) =>
       ctx.log.info(s"FailureDetector-$id: Received GetAliveActors")
 
+      // Create copy of the aliveActors map
+      var actors = this.aliveActors.toMap
+
+      // Remove our own id from the map
+      actors -= id
+
       // Add sender to the aliveActors map
-      aliveActors += (id -> true)
+      actors += (id -> true)
 
       // Send the aliveActors to the failure detector from the actor
-      from ! AliveActorsResponse(aliveActors.toMap)
+      from ! AliveActorsResponse(actors)
 
+      Behaviors.same
+
+    case StartFD =>
+      ctx.log.info(s"FailureDetector-$id: Starting failure detector timer!!!!")
+      startFailureDetectorTimer()
       Behaviors.same
 
   Behaviors.same
