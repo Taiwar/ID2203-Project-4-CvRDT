@@ -182,11 +182,6 @@ class ActorFailureDetectorV2(
 
       Behaviors.same
 
-    // TODO: Remove this if not needed
-    case GetIdResponse(actorId) =>
-      debugMsg(s"Received idResponse")
-      Behaviors.same
-
     // Only handle timeout if the actor is still alive
     case Timeout(actorId: Int) =>
       debugMsg(s"Timeout for actor $actorId")
@@ -228,7 +223,7 @@ class ActorFailureDetectorV2(
     case Heartbeat() =>
       debugMsg(s"Sending heartbeat")
 
-      debugMsg(s"AliveActors: $aliveActors")
+//      debugMsg(s"AliveActors: $aliveActors")
 
       // TODO: Check if needed
       // Update the others map
@@ -289,25 +284,6 @@ class ActorFailureDetectorV2(
       }
       Behaviors.same
 
-    case JoinRequest(newActor) =>
-      debugMsg(s"Received JoinRequest from ${newActor.path.name}")
-
-      // Refresh the actor references
-      refreshOthers()
-
-      debugMsg(s"Updated others: $others")
-      // Get the id of the new actor from the others
-      others.find(_._2 == newActor) match {
-        case Some((actorId, actor)) =>
-          // Add the new actor to the aliveActors map
-          aliveActors += (actorId -> true)
-
-          debugMsg(s"Updated aliveActors: $aliveActors")
-        case None =>
-          debugMsg(s"Actor not found")
-      }
-      Behaviors.same
-
     // Update the aliveActors map with the latest aliveActors from the leader
     case AliveActorsResponse(aliveActors) =>
       debugMsg(s"Received AliveActorsResponse")
@@ -322,19 +298,6 @@ class ActorFailureDetectorV2(
           this.aliveActors -= id
 
           debugMsg(s"Get new AliveActors from the leader: $aliveActors")
-
-      // After updating the aliveActors map, send join requests to the actors that are alive
-      for (actorId <- aliveActors.keys if aliveActors(actorId)) {
-        // Get the actor from the 'others' map
-        others.get(actorId) match {
-          case Some(actor: ActorRef[CRDTActorV4.Command]) =>
-            // Send JoinRequest to the actor
-//            actor ! CRDTActorV4.RequestToJoin(mainActor.get)
-          case _ =>
-            // Skip the actor if it is not found or not of the correct type
-            debugMsg(s"Actor not found")
-        }
-      }
 
       // Wait a little bit before starting the failure detector timer
       ctx.scheduleOnce(800.millis, ctx.self, StartFD)
