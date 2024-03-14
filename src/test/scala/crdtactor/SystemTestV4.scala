@@ -15,6 +15,8 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
     Utils.setLoggerLevel("INFO")
 
+    val probe: TestProbe[Command] = createTestProbe[Command]()
+
     // Create the actors
     val actors = (0 until N_ACTORS).map { i =>
       // Spawn the actor and get its reference (address)
@@ -30,9 +32,22 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     // Set leader (BLE mock)
     actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.Leader(actors(0)))
 
-    Thread.sleep(50) // Wait for actors to be ready
+    // Set test probe for leader
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.testProbe(probe.ref))
 
-    val probe: TestProbe[Command] = createTestProbe[Command]()
+    // Start the failure detector
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.StartFailureDetector(false))
+
+    // Spawn a supervisor for each actor
+    val supervisors = (0 until N_ACTORS).map { i =>
+      // Spawn the actor and get its reference (address)
+      val supervisorRef = spawn(Behaviors.setup[ActorSupervisorV1.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorSupervisorV1(i + 100, ctx, timers))
+      })
+      i + 100 -> supervisorRef
+    }.toMap
+
+    Thread.sleep(100) // Wait for actors to be ready
   }
 
   "The system" must {
@@ -177,6 +192,126 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       // Either a1 and b1 are both 150 or both are not 150
       (a2.get == 150 && b2.get == 150) shouldEqual true
+    }
+
+    "have sequentially consistent state after atomic actions with failing nodes" in new StoreSystem {
+      // Simulate a bank transfer
+
+      // Set up
+      actors(0) ! Put("test", "a", 100, probe.ref)
+      actors(0) ! Put("test", "b", 200, probe.ref)
+      probe.receiveMessage()
+      probe.receiveMessage()
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 0 reads value of a and b
+      actors(0) ! Atomic(
+        "test",
+        Array(Get("test", "a", probe.ref), Get("test", "b", probe.ref)),
+        probe.ref
+      )
+
+      // Kill one actor
+      actors(3) ! CRDTActorV4.Die
+
+      // Collect all responses of the atomic abort
+      val atomicAbortResponses = (0 until N_ACTORS - 1).map(_ => probe.receiveMessage())
+
+      // the size of the responses should be N_ACTORS - 1
+      atomicAbortResponses.size shouldEqual (N_ACTORS - 1)
+
+      println(atomicAbortResponses)
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 1 reads values of a and b
+      actors(1) ! Get("test", "a", probe.ref)
+      val a1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(1) ! Get("test", "b", probe.ref)
+      val b1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: 100 b: 200; Received at actor 1: a1: $a1, b1: $b1"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a1.get == 150 && b1.get == 150) || (a1.get != 150 && b1.get != 150) shouldEqual true
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+      // Eventually, actor 2 reads new values of a and b
+      actors(2) ! Get("test", "a", probe.ref)
+      val a2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(2) ! Get("test", "b", probe.ref)
+      val b2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: 100 b: 200; Received at actor 2: a2: $a2, b2: $b2"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a2.get == 150 && b2.get == 150) || (a2.get != 150 && b2.get != 150) shouldEqual true
+    }
+
+    "have sequentially consistent state after atomic actions with failing leader" in new StoreSystem {
+      // Simulate a bank transfer
+
+      // Set up
+      actors(0) ! Put("test", "a", 100, probe.ref)
+      actors(0) ! Put("test", "b", 200, probe.ref)
+      probe.receiveMessage()
+      probe.receiveMessage()
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 0 reads value of a and b
+      actors(0) ! Atomic(
+        "test",
+        Array(Get("test", "a", probe.ref), Get("test", "b", probe.ref)),
+        probe.ref
+      )
+
+      // Kill the current leader
+      actors(0) ! CRDTActorV4.Die
+
+      // After the leader dies, the actor should receive a LeaderAbort message from the new leader
+      probe.receiveMessage() match {
+        case LeaderAbort(msg) =>
+          msg shouldEqual "Aborted due to leader change"
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 1 reads values of a and b
+      actors(1) ! Get("test", "a", probe.ref)
+      val a1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(1) ! Get("test", "b", probe.ref)
+      val b1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: 100 b: 200; Received at actor 1: a1: $a1, b1: $b1"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a1.get == 150 && b1.get == 150) || (a1.get != 150 && b1.get != 150) shouldEqual true
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+      // Eventually, actor 2 reads new values of a and b
+      actors(2) ! Get("test", "a", probe.ref)
+      val a2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(2) ! Get("test", "b", probe.ref)
+      val b2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: 100 b: 200; Received at actor 2: a2: $a2, b2: $b2"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a2.get == 150 && b2.get == 150) || (a2.get != 150 && b2.get != 150) shouldEqual true
     }
 
     "have sequentially consistent state after concurrent atomic actions" in new StoreSystem {
@@ -375,6 +510,5 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         Thread.sleep(25)
       }
     }
-
   }
 }

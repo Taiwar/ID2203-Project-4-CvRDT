@@ -25,6 +25,8 @@ object CRDTActorV4 {
       extends ControlMessage
       with Command
 
+  case class testProbe(from: ActorRef[Command]) extends Command
+
   case class State(state: ddata.LWWMap[String, Int]) extends Indication
 
   // Key-Value Ops
@@ -61,7 +63,14 @@ object CRDTActorV4 {
       responses: Iterable[(String, Command)]
   ) extends Indication
 
+  case class MortalityNotice(actor: ActorRef[Command]) extends Command
+
+  case object Die extends Command
   case class AtomicAbort(opId: String) extends Indication
+
+  case class LeaderAbort(reason: String) extends Indication
+
+  case class AbortAtomicOperations() extends Command
 
   // Error responses
 
@@ -110,6 +119,18 @@ object CRDTActorV4 {
 
   // Ballot leader election messages
   case class Leader(leader: ActorRef[Command]) extends Command
+
+  // Failure detector
+  case class StartFailureDetector(revived: Boolean) extends Command
+
+  // Heartbeat
+  case class Heartbeat(from: ActorRef[ActorFailureDetectorV2.Command], delay: Boolean) extends Command
+
+  case class HeartbeatAck(from: ActorRef[Command]) extends Command
+
+  case class RequestToJoin(from: ActorRef[Command]) extends Command
+
+  case class GetAliveActors(from: ActorRef[ActorFailureDetectorV2.Command]) extends Command
 }
 
 import crdtactor.CRDTActorV4.*
@@ -121,6 +142,8 @@ class CRDTActorV4(
     ctx: ActorContext[Command],
     timers: TimerScheduler[CRDTActorV4.Command]
 ) extends AbstractBehavior[Command](ctx) {
+
+  private var testActor = Option.empty[ActorRef[Command]]
 
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
@@ -151,6 +174,12 @@ class CRDTActorV4(
   private val atomicCommandBuffer = mutable.Queue[Command]()
   private var dirty = false
 
+  // Random number generator
+  val r = scala.util.Random
+
+  // Failure detector
+  var failureDetector: ActorRef[ActorFailureDetectorV2.Command] = _
+
   // Leader state
   private val pendingTransactionAgreement =
     mutable.Map[(Int, Int), Int]()
@@ -160,10 +189,20 @@ class CRDTActorV4(
 
   // Start timer to periodically broadcast the delta
   timers.startTimerWithFixedDelay(
-    TimerKey,
-    Timeout,
-    Utils.CRDT_SYNC_PERIOD.milliseconds
+  TimerKey,
+  Timeout,
+  Utils.CRDT_SYNC_PERIOD.milliseconds
   )
+
+  // Print debug messages
+  private def debugMsg(msg: String) = {
+    context.log.info(s"CRDTActor-$id: $msg")
+  }
+
+  private def debugFD(msg: String) = {
+//    context.log.info(s"CRDTActor-$id: $msg")
+  }
+
 
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
@@ -191,6 +230,11 @@ class CRDTActorV4(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
+    case testProbe(from) =>
+      debugMsg(s"CRDTActor-$id: Storing test probe to actor")
+      testActor = Some(from)
+      Behaviors.same
+
     // Receive DelayedMessage and send the internal message to ourselves after a delay
     case DelayedMessage(message) =>
       // Schedule the message to be sent to ourselves after Utils.RANDOM_MESSAGE_DELAY
@@ -217,6 +261,13 @@ class CRDTActorV4(
         // If we're now leader, we need to abort ongoing atomic commands
         if (l == ctx.self)
           ctx.log.warn(s"CRDTActor-$id: I'm the new leader")
+
+          // Send Leader abort to test probe
+          testActor match
+            case Some(actor) =>
+              actor ! LeaderAbort("Aborted due to leader change")
+            case None => ()
+          debugMsg(s"Leader-$id: Aborting ongoing atomic commands due to leader change ($pendingTransactionRefs)")
           // Send abort to all atomic commands in pendingTransactionRefs
           pendingTransactionRefs.foreach { case (opId, origin) =>
             origin ! AtomicAbort(opId)
@@ -241,7 +292,7 @@ class CRDTActorV4(
       broadcastAndResetDeltas()
       // Print if leader
       if (leader.isDefined && leader.get == ctx.self) {
-        ctx.log.info(s"Leader-$id: Sending delta")
+        debugMsg(s"Leader-$id: Sending delta")
       }
       Behaviors.same
 
@@ -252,6 +303,8 @@ class CRDTActorV4(
         return Behaviors.same
       }
       ctx.log.debug(s"CRDTActor-$id: Executing PUT $key -> $value")
+
+      // TODO: Could we use a logical clock and avoid the need for synchronized clocks?
       crdtstate = crdtstate.put(selfNode, key, value)
       dirty = true
       ctx.log.debug(s"CRDTActor-$id: CRDT state: $crdtstate")
@@ -330,7 +383,7 @@ class CRDTActorV4(
 
       // If we got all responses, commit
       if (pendingTransactionAgreement(timestamp) == others.size) {
-        ctx.log.info(
+        debugMsg(
           s"Leader-$id: All locks acquired for transaction $timestamp"
         )
         // Get commands from pending transactions
@@ -362,6 +415,8 @@ class CRDTActorV4(
             ("unknown", UnknownCommandResponse())
         }
         transactionWorking = false
+
+        debugMsg(s"Leader-$id: Executed transaction $timestamp with pendingTransactionRefs $pendingTransactionRefs")
 
         // Remove transaction from pending
         pendingTransactionAgreement -= timestamp
@@ -455,7 +510,7 @@ class CRDTActorV4(
       time = (time._1, time._2 + 1)
       val timestamp = time
 
-      ctx.log.info(s"Leader-$id: Starting transaction $timestamp")
+      debugMsg(s"Leader-$id: Starting transaction $timestamp")
 
       // Add new transaction to transactions
       pendingTransactionAgreement += (timestamp -> 0)
@@ -486,6 +541,115 @@ class CRDTActorV4(
       ctx.log.debug(s"CRDTActor-$id: Sending state to ${from.path.name}")
       from ! State(crdtstate)
       Behaviors.same
+
+//    case AtomicAbortAtomicAbort(opId) =>
+//      ctx.log.debug(s"CRDTActor-$id: Consuming atomic abort operation")
+//      Behaviors.same
+
+    // Start the failure detector for this actor
+    case StartFailureDetector(revived) =>
+      debugFD(s"CRDTActor-$id: Starting failure detector for CRDTActor-$id")
+
+      // Spawn the failure detector and give it a name
+      failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetectorV2.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorFailureDetectorV2(id, ctx, timers))
+      }, s"failure-detector-${id.toString}")
+
+      failureDetector ! ActorFailureDetectorV2.Start(ctx.self, revived)
+      Behaviors.same
+
+    // Heartbeat handling
+    case Heartbeat(from, delay) =>
+      debugFD(s"CRDTActor-$id: Received heartbeat")
+
+      if (delay) {
+        debugFD(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
+        ctx.scheduleOnce(600.millis, ctx.self, Heartbeat(from, false))
+      } else {
+        debugFD(s"CRDTActor-$id: Sending heartbeat ack to ${from.path.name}")
+        // Send ack back to the sender
+        from ! ActorFailureDetectorV2.HeartbeatAck(ctx.self)
+      }
+
+      Behaviors.same
+
+    case HeartbeatAck(from) =>
+      debugFD(s"CRDTActor-$id: Received heartbeat ack")
+      Behaviors.same
+
+    case MortalityNotice(actor) =>
+      debugMsg(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
+
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetectorV2.MortalityNotice(actor)
+
+      // If actor is/was the leader, we need to find a new leader
+      // (Make next actor the leader)
+      if (leader.isDefined && leader.get == actor) {
+        debugMsg(s"CRDTActor-$id: Leader has died, finding new leader")
+
+        // Get id of the previous leader
+        val previousLeaderId = everyone.find(_._2 == actor).get._1
+
+        // Get the next leader
+        // TODO: Find safer way to get next leader
+        val nextLeader = everyone.find(_._1 > previousLeaderId + 1)
+
+        if (nextLeader.isDefined) {
+          debugMsg(s"CRDTActor-$id: New leader is ${nextLeader.get._2.path.name}")
+
+          everyone.foreach { (_, actorRef) =>
+            if (actorRef != actor) {
+              actorRef ! Leader(nextLeader.get._2)
+            }
+          }
+        }
+      } // If im the leader, we need to abort ongoing transactions instead
+      else if (leader.isDefined && leader.get == ctx.self) {
+        debugMsg(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions")
+
+        // Send abort message to all actors except the dead one
+        everyone.foreach { (_, actorRef) =>
+          if (actorRef != actor) {
+            actorRef ! AbortAtomicOperations()
+          }
+        }
+      }
+
+      Behaviors.same
+
+    case AbortAtomicOperations() =>
+      debugMsg(s"CRDTActor-$id: Received atomic abort, clearing locks/transactions/refs")
+
+      // Send abort to all atomic commands in pendingTransactionRefs
+      pendingTransactionRefs.foreach { case (opId, origin) =>
+        origin ! AtomicAbort(opId)
+      }
+
+      // Clear pending transactions
+      pendingTransactionAgreement.clear()
+      pendingTransactions.clear()
+      pendingTransactionRefs.clear()
+      // Unlock all locks
+      locks.clear()
+
+      Behaviors.same
+
+    case RequestToJoin(from) =>
+      debugFD(s"CRDTActor-$id: Received request to join from ${from.path.name}")
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetectorV2.JoinRequest(from)
+      Behaviors.stopped
+
+    case GetAliveActors(from) =>
+      debugFD(s"CRDTActor-$id: Received request to get alive actors from ${from.path.name}")
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetectorV2.GetAliveActors(from)
+      Behaviors.same
+
+    case Die =>
+      context.log.info("Received PoisonPill, stopping...")
+      Behaviors.stopped
 
   Behaviors.same
 }

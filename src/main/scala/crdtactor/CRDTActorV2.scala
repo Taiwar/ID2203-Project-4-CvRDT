@@ -1,11 +1,13 @@
 package crdtactor
 
+import CRDTActorV2.Command
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.cluster.ddata
 import org.apache.pekko.cluster.ddata.{LWWMap, ReplicatedDelta}
 
 import scala.concurrent.duration.DurationInt
+import scala.util.Random
 
 object CRDTActorV2 {
   // The type of messages that the actor can handle
@@ -24,7 +26,7 @@ object CRDTActorV2 {
     extends Command
 
   // Triggers the actor to start the computation (do this only once!)
-  case object Start extends Command
+  case class Start() extends Command
 
   // For testing: Messages to read the current state of the CRDT
   case class ReadState(from: ActorRef[Command]) extends Command
@@ -47,9 +49,23 @@ object CRDTActorV2 {
   case class AtomicResponse(responses: Iterable[(String, Command)])
     extends Command
 
+  case class MortalityNotice(actor: ActorRef[Command]) extends Command
+
+  case object Die extends Command
+
+  // New message type to hold a MortalityNoticeWrapper from ActorFailureDetectorV1
+//  case class MortalityNoticeWrapper(mortalityNotice: ActorFailureDetectorV1.MortalityNoticeWrapper) extends Command
+
   // Timer
   private case object Timeout extends Command
   private case object TimerKey
+
+  // Failure detector
+  case object StartFailureDetector extends Command
+
+  // Heartbeat
+  case class Heartbeat(from: ActorRef[ActorFailureDetectorV1.Command], delay: Boolean) extends Command
+  case class HeartbeatAck(from: ActorRef[Command]) extends Command
 }
 
 import crdtactor.CRDTActorV2.*
@@ -85,6 +101,12 @@ class CRDTActorV2(
     50.millis
   )
 
+  // Random number generator
+  val r = scala.util.Random
+
+  // Failure detector
+  var failureDetector: ActorRef[ActorFailureDetectorV1.Command] = _
+
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
     // Broadcast the delta to all other actors and reset the delta
@@ -112,9 +134,16 @@ class CRDTActorV2(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
-    case Start =>
+    case Start() =>
       ctx.log.info(s"CRDTActor-$id started")
-      // ctx.self ! ConsumeOperation // start consuming operations
+
+      // Spawn the failure detector and give it a name
+      failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetectorV1.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorFailureDetectorV1(id, ctx, timers))
+      }, s"failure-detector-$id")
+
+      // Start the failure detector
+      failureDetector ! ActorFailureDetectorV1.Start(ctx.self)
       Behaviors.same
 
     case Put(key, value, from) =>
@@ -239,6 +268,50 @@ class CRDTActorV2(
       ctx.log.info(s"CRDTActor-$id: Sending state to ${from.path.name}")
       from ! StateMsg(crdtstate)
       Behaviors.same
+
+    // For testing purposes
+    // TODO: Remove this
+    case StartFailureDetector =>
+      ctx.log.info(s"CRDTActor-$id: Starting failure detector")
+      // Randomize the id of the failure detector
+      val fdId = r.nextInt(100) + id
+
+      // Spawn the failure detector and give it a name
+      failureDetector = ctx.spawn(Behaviors.setup[crdtactor.ActorFailureDetectorV1.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorFailureDetectorV1(fdId, ctx, timers))
+      }, s"failure-detector-${fdId.toString}")
+
+      failureDetector ! ActorFailureDetectorV1.Start(ctx.self)
+      Behaviors.same
+
+    // Heartbeat handling
+    case Heartbeat(from, delay) =>
+      ctx.log.info(s"CRDTActor-$id: Received heartbeat")
+
+      if (delay) {
+        ctx.log.info(s"CRDTActor-$id: Delaying heartbeat ack for 600ms")
+        ctx.scheduleOnce(600.millis, ctx.self, Heartbeat(from, false))
+      } else {
+        ctx.log.info(s"CRDTActor-$id: Sending heartbeat ack to ${from.path.name}")
+        // Send ack back to the sender
+        from ! ActorFailureDetectorV1.HeartbeatAck(ctx.self)
+      }
+
+      Behaviors.same
+
+    case HeartbeatAck(from) =>
+      ctx.log.info(s"CRDTActor-$id: Received heartbeat ack")
+      Behaviors.same
+
+    case MortalityNotice(actor) =>
+      ctx.log.info(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
+      // Update the failure detector with the new state
+      failureDetector ! ActorFailureDetectorV1.MortalityNotice(actor)
+      Behaviors.same
+
+    case Die =>
+      context.log.info("Received PoisonPill, stopping...")
+      Behaviors.stopped
 
   Behaviors.same
 }
