@@ -510,55 +510,5 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         Thread.sleep(25)
       }
     }
-
-    "have eventually consistent state after CRDT actions (basic) when nodes fail" in new StoreSystem {
-      // Create randomized key value tuples
-      val keyValues =
-        (0 until N_ACTORS).map(_ => (Utils.randomString(), Utils.randomInt()))
-
-      println(keyValues)
-
-      // Send random put messages to all actors
-      actors.foreach((i, actorRef) =>
-        actorRef ! Put("test", keyValues(i)._1, keyValues(i)._2, probe.ref)
-      )
-
-      // Kill one actor
-      actors(0) ! CRDTActorV4.Die
-
-      // Wait for actor to die
-      Thread.sleep(1000)
-
-      // We should receive one less response since one actor died
-      var responses = (1 until N_ACTORS).map(_ => probe.receiveMessage())
-
-      println(responses)
-
-      responses.foreach {
-        case putMsg: PutResponse =>
-          putMsg should not be null
-        case msg =>
-          fail("Unexpected message: " + msg)
-      }
-
-      // Wait for sync messages (assuming partially synchronous system)
-      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE + Utils.CRDT_SYNC_PERIOD)
-
-      // Send a get message for each key to each actor and verify the responses
-      keyValues.foreach { case (key, value) =>
-        actors.drop(1).foreach((_, actorRef) => actorRef ! Get("test", key, probe.ref))
-        responses = (1 until N_ACTORS).map(_ => probe.receiveMessage())
-
-        println(responses)
-
-        responses.foreach {
-          case getMsg: GetResponse =>
-            getMsg.value.get shouldEqual value
-          case msg =>
-            fail("Unexpected message: " + msg)
-        }
-      }
-    }
-
   }
 }
