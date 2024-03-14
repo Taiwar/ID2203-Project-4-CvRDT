@@ -15,6 +15,8 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
     Utils.setLoggerLevel("INFO")
 
+    val probe: TestProbe[Command] = createTestProbe[Command]()
+
     // Create the actors
     val actors = (0 until N_ACTORS).map { i =>
       // Spawn the actor and get its reference (address)
@@ -30,6 +32,9 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     // Set leader (BLE mock)
     actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.Leader(actors(0)))
 
+    // Set test probe for leader
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.testProbe(probe.ref))
+
     // Start the failure detector
     actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.StartFailureDetector(false))
 
@@ -43,8 +48,6 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     }.toMap
 
     Thread.sleep(100) // Wait for actors to be ready
-
-    val probe: TestProbe[Command] = createTestProbe[Command]()
   }
 
   "The system" must {
@@ -268,16 +271,16 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
         probe.ref
       )
 
-      // Kill one actor
+      // Kill the current leader
       actors(0) ! CRDTActorV4.Die
 
-      // Collect all responses of the atomic abort
-      val atomicAbortResponses = probe.receiveMessage()
-
-      // the size of the responses should be N_ACTORS - 1
-//      atomicAbortResponses.size shouldEqual (N_ACTORS - 1)
-
-      println(atomicAbortResponses)
+      // After the leader dies, the actor should receive a LeaderAbort message from the new leader
+      probe.receiveMessage() match {
+        case LeaderAbort(msg) =>
+          msg shouldEqual "Aborted due to leader change"
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
 
       Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
 
