@@ -25,6 +25,8 @@ object CRDTActorV4 {
       extends ControlMessage
       with Command
 
+  case class testProbe(from: ActorRef[Command]) extends Command
+
   case class State(state: ddata.LWWMap[String, Int]) extends Indication
 
   // Key-Value Ops
@@ -65,6 +67,8 @@ object CRDTActorV4 {
 
   case object Die extends Command
   case class AtomicAbort(opId: String) extends Indication
+
+  case class LeaderAbort(reason: String) extends Indication
 
   case class AbortAtomicOperations() extends Command
 
@@ -138,6 +142,8 @@ class CRDTActorV4(
     ctx: ActorContext[Command],
     timers: TimerScheduler[CRDTActorV4.Command]
 ) extends AbstractBehavior[Command](ctx) {
+
+  private var testActor = Option.empty[ActorRef[Command]]
 
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
@@ -224,6 +230,11 @@ class CRDTActorV4(
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
+    case testProbe(from) =>
+      debugMsg(s"CRDTActor-$id: Storing test probe to actor")
+      testActor = Some(from)
+      Behaviors.same
+
     // Receive DelayedMessage and send the internal message to ourselves after a delay
     case DelayedMessage(message) =>
       // Schedule the message to be sent to ourselves after Utils.RANDOM_MESSAGE_DELAY
