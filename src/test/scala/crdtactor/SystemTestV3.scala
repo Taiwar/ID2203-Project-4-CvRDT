@@ -8,7 +8,7 @@ import scala.util.Random
 
 class SystemTestV3 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
-  import CRDTActorV3.*
+  import crdtactor.CRDTActorV3.*
 
   trait StoreSystem {
     val N_ACTORS = 8
