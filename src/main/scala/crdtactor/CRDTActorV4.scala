@@ -562,7 +562,7 @@ class CRDTActorV4(
       Behaviors.same
 
     case MortalityNotice(actor) =>
-      debugFD(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
+      debugMsg(s"CRDTActor-$id: Received mortality notice that ${actor.path.name} has stopped responding")
 
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.MortalityNotice(actor)
@@ -570,7 +570,7 @@ class CRDTActorV4(
       // If actor is/was the leader, we need to find a new leader
       // (Make next actor the leader)
       if (leader.isDefined && leader.get == actor) {
-        debugFD(s"CRDTActor-$id: Leader has died, finding new leader")
+        debugMsg(s"CRDTActor-$id: Leader has died, finding new leader")
 
         // Get id of the previous leader
         val previousLeaderId = everyone.find(_._2 == actor).get._1
@@ -580,7 +580,7 @@ class CRDTActorV4(
         val nextLeader = everyone.find(_._1 > previousLeaderId + 1)
 
         if (nextLeader.isDefined) {
-          debugFD(s"CRDTActor-$id: New leader is ${nextLeader.get._2.path.name}")
+          debugMsg(s"CRDTActor-$id: New leader is ${nextLeader.get._2.path.name}")
 
           everyone.foreach { (_, actorRef) =>
             if (actorRef != actor) {
@@ -590,7 +590,7 @@ class CRDTActorV4(
         }
       } // If im the leader, we need to abort ongoing transactions instead
       else if (leader.isDefined && leader.get == ctx.self) {
-        debugFD(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions")
+        debugMsg(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions")
 
         // Send abort message to all actors except the dead one
         everyone.foreach { (_, actorRef) =>
@@ -603,7 +603,7 @@ class CRDTActorV4(
       Behaviors.same
 
     case AbortAtomicOperations() =>
-      debugFD(s"CRDTActor-$id: Received atomic abort, clearing locks/transactions/refs")
+      debugMsg(s"CRDTActor-$id: Received atomic abort, clearing locks/transactions/refs")
 
       // Send abort to all atomic commands in pendingTransactionRefs
       pendingTransactionRefs.foreach { case (opId, origin) =>
