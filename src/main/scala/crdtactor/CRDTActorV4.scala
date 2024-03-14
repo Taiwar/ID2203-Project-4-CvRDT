@@ -65,6 +65,8 @@ object CRDTActorV4 {
 
   case class MortalityNotice(actor: ActorRef[Command]) extends Command
 
+  case class AbortOperationsTimer(actor: ActorRef[Command]) extends Command
+
   case object Die extends Command
   case class AtomicAbort(opId: String) extends Indication
 
@@ -604,16 +606,12 @@ class CRDTActorV4(
             }
           }
         }
-      } // If im the leader, we need to abort ongoing transactions instead
+      } // If im the leader, we need to set a timer to abort ongoing transactions
       else if (leader.isDefined && leader.get == ctx.self) {
         debugMsg(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions")
 
-        // Send abort message to all actors except the dead one
-        everyone.foreach { (_, actorRef) =>
-          if (actorRef != actor) {
-            actorRef ! AbortAtomicOperations()
-          }
-        }
+        // Set a timer to abort ongoing transactions
+        ctx.scheduleOnce(500.millis, ctx.self, AbortOperationsTimer(actor))
       }
 
       Behaviors.same
@@ -632,6 +630,18 @@ class CRDTActorV4(
       pendingTransactionRefs.clear()
       // Unlock all locks
       locks.clear()
+
+      Behaviors.same
+
+    case AbortOperationsTimer(actor) =>
+      debugMsg(s"CRDTActor-$id: Timer expired, aborting ongoing transactions")
+
+      // Send abort message to all actors except the dead one
+      everyone.foreach { (_, actorRef) =>
+        if (actorRef != actor) {
+          actorRef ! AbortAtomicOperations()
+        }
+      }
 
       Behaviors.same
 

@@ -1,6 +1,7 @@
 package crdtactor
 
 import crdtactor.ActorFailureDetectorV2.*
+import crdtactor.ActorSupervisorV1.createActor
 import crdtactor.CRDTActorV4.Leader
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
@@ -13,12 +14,12 @@ class SystemTestFDV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
   import CRDTActorV2.*
 
   trait StoreSystem {
-    val N_ACTORS = 3
+    val N_ACTORS = 4
 
     Utils.setLoggerLevel("INFO")
 
     // Create the actors
-    val actors = (0 until N_ACTORS).map { i =>
+    val actors = (0 until N_ACTORS).map { i  =>
       // Spawn the actor and get its reference (address)
       val actorRef = spawn(Behaviors.setup[CRDTActorV4.Command] { ctx =>
         Behaviors.withTimers(timers => new CRDTActorV4(i, ctx, timers))
@@ -33,7 +34,17 @@ class SystemTestFDV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     actors.foreach((_, actorRef) => actorRef ! Leader(actors(0)))
 
     // Start the failure detector
-    actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.StartFailureDetector)
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV4.StartFailureDetector(false))
+
+    // Spawn a supervisor for each actor
+    val supervisors = (0 until N_ACTORS).map { i  =>
+      // Spawn the actor and get its reference (address)
+      val supervisorRef = spawn(Behaviors.setup[ActorSupervisorV1.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorSupervisorV1(i + 100, ctx, timers))
+      })
+      i + 100 -> supervisorRef
+    }.toMap
+
   }
 
   // TODO: Write a test for the failure detector
@@ -156,15 +167,23 @@ class SystemTestFDV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     }
 
     "have working heartbeat system" in new StoreSystem {
+      Thread.sleep(2000)
 
-      Thread.sleep(3000)
+      // kill the second actor
+      actors(2) ! CRDTActorV4.Die
+      Utils.GLOBAL_STATE.remove(2) // Remove the actor from the GLOBAL_STATE map
 
-      // Kill the first actor
-      actors(0) ! CRDTActorV4.Die
+      Thread.sleep(2000)
 
+      // Revive the second actor
+      supervisors(102) ! createActor()
 
+      Thread.sleep(5000)
+
+      // Kill the revived actor
+      supervisors(102) ! ActorSupervisorV1.killActor()
 
       Thread.sleep(10000)
-
     }
 }
+

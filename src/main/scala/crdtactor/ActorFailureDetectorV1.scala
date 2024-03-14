@@ -41,13 +41,13 @@ object ActorFailureDetectorV1 {
   // Time
 
   // Time between heartbeats interval (Gamma γ)
-  val gamma = 1000.millis
+  val gamma = 5000.millis
 
   // Timeout interval (Delta δ)
-  val delta = 500.millis
+  val delta = 1000.millis
 
   // Random time difference between nodes (Epsilon ε)
-  val epsilon = 100.millis
+  val epsilon = 500.millis
 
   // TODO: Check if this is needed
   // Total wait time (time T)
