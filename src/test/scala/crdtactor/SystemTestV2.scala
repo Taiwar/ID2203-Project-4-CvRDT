@@ -27,7 +27,7 @@ class SystemTestV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
 
     // Start the actors
-    actors.foreach((_, actorRef) => actorRef ! CRDTActorV2.Start)
+    actors.foreach((_, actorRef) => actorRef ! CRDTActorV2.Start())
   }
 
   "The system" must {
@@ -164,52 +164,54 @@ class SystemTestV2 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     "have working heartbeat handling" in new StoreSystem {
       // Create a probe for the failure detector and the actor
       val probeCRDT = createTestProbe[crdtactor.CRDTActorV2.Command]()
-      val probeFailureDetector = createTestProbe[ActorFailureDetector.Command]()
+      val probeFailureDetector = createTestProbe[ActorFailureDetectorV1.Command]()
 
       // Spawn the failure detector and give it a name
-      val failureDetector = spawn(Behaviors.setup[ActorFailureDetector.Command] { ctx =>
-        Behaviors.withTimers(timers => new ActorFailureDetector(0, ctx, timers))
+      val failureDetector = spawn(Behaviors.setup[ActorFailureDetectorV1.Command] { ctx =>
+        Behaviors.withTimers(timers => new ActorFailureDetectorV1(0, ctx, timers))
       }, "failureDetector")
 
-      println("Sending the heartbeat")
+      Thread.sleep(1000)
 
-      // Send a Heartbeat message to the actor
-      actors(0) ! CRDTActorV2.Heartbeat(failureDetector)
+//      println("Sending the heartbeat")
+//
+//      // Send a Heartbeat message to the actor
+//      actors(0) ! CRDTActorV2.Heartbeat(failureDetector)
 
 //      println("Expecting the heartbeat ack")
 
 //      println("Sleeping for 5 seconds")
 
       // Expect a HeartbeatAck message from the actor to the failure detector
-//      probeFailureDetector.expectMessage(ActorFailureDetector.HeartbeatAck(actors(0)))
+//      probeFailureDetector.expectMessage(ActorFailureDetectorV1.HeartbeatAck(actors(0)))
 //
 //      // Expect a HeartbeatAck message from the actor to the failure detector
 //      probeCRDT.expectMessage(CRDTActorV2.Heartbeat(failureDetector))
 
 //      Thread.sleep(10000)
 //      // Send a Heartbeat message to the actor
-//      actors(0) ! Heartbeat(ActorFailureDetector.Heartbeat(probe.ref))
+//      actors(0) ! Heartbeat(ActorFailureDetectorV1.Heartbeat(probe.ref))
 //
 //      // Expect a HeartbeatAck message from the actor
-//      probe.expectMessage(ActorFailureDetector.HeartbeatAck(actorRef))
+//      probe.expectMessage(ActorFailureDetectorV1.HeartbeatAck(actorRef))
 //
 //      // Expect no message for the duration of the timeout interval
-//      probe.expectNoMessage(ActorFailureDetector.delta)
+//      probe.expectNoMessage(ActorFailureDetectorV1.delta)
 //
 //      // Send a Timeout message to the actor
-//      actorRef ! ActorFailureDetector.Timeout
+//      actorRef ! ActorFailureDetectorV1.Timeout
 //
 //      // Expect a MortalityNoticeWrapper message from the actor
-//      probe.expectMessageType[ActorFailureDetector.MortalityNoticeWrapper]
+//      probe.expectMessageType[ActorFailureDetectorV1.MortalityNoticeWrapper]
 
       // Receive one message
 //      probe.receiveMessage()
 
 //      // Send a Timeout message to the actor
-//      actors(0) ! ActorFailureDetector.Timeout
+//      actors(0) ! ActorFailureDetectorV1.Timeout
 //
 //      // Expect a MortalityNoticeWrapper message from the actor
-//      probe.expectMessageType[ActorFailureDetector.MortalityNoticeWrapper]
+//      probe.expectMessageType[ActorFailureDetectorV1.MortalityNoticeWrapper]
     }
 
   }
