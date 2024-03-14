@@ -94,7 +94,7 @@ class ActorFailureDetectorV2(
   }
 
   def debugMsg(msg: String) = {
-    ctx.log.info(s"FailureDetector-$id: $msg")
+//    ctx.log.info(s"FailureDetector-$id: $msg")
   }
 
   // A map with all the other actors and a boolean if they are alive
@@ -148,7 +148,6 @@ class ActorFailureDetectorV2(
     case Start(from, revived) =>
 
       debugMsg(s"started by ${from.path.name}")
-//      ctx.log.info(s"FailureDetector-$id started by ${from.path.name}")
 
       // Store the sender of the start message
       mainActor = Some(from)
@@ -273,6 +272,7 @@ class ActorFailureDetectorV2(
     case MortalityNotice(from) =>
       debugMsg(s"Received MortalityNotice")
 
+      // Set the actor to dead
       others.find(_._2 == from) match {
         case Some((actorId, actor)) =>
           // Handle MortalityNotice message from CRDTActorV4
@@ -282,6 +282,10 @@ class ActorFailureDetectorV2(
         case None =>
           debugMsg(s"Actor not found")
       }
+
+      // Send back the aliveActors to the actor
+//      from ! CRDTActorV4.AllParticipants(aliveActors, ctx.self)
+      
       Behaviors.same
 
     // Update the aliveActors map with the latest aliveActors from the leader
