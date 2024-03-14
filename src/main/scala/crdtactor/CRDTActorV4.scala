@@ -262,6 +262,11 @@ class CRDTActorV4(
         if (l == ctx.self)
           ctx.log.warn(s"CRDTActor-$id: I'm the new leader")
 
+          // Send Leader abort to test probe
+          testActor match
+            case Some(actor) =>
+              actor ! LeaderAbort("Aborted due to leader change")
+            case None => ()
           debugMsg(s"Leader-$id: Aborting ongoing atomic commands due to leader change ($pendingTransactionRefs)")
           // Send abort to all atomic commands in pendingTransactionRefs
           pendingTransactionRefs.foreach { case (opId, origin) =>
