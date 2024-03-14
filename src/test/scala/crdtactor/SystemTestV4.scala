@@ -251,6 +251,66 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       (a2.get == 150 && b2.get == 150) || (a2.get != 150 && b2.get != 150) shouldEqual true
     }
 
+    "have sequentially consistent state after atomic actions with failing leader" in new StoreSystem {
+      // Simulate a bank transfer
+
+      // Set up
+      actors(0) ! Put("test", "a", 100, probe.ref)
+      actors(0) ! Put("test", "b", 200, probe.ref)
+      probe.receiveMessage()
+      probe.receiveMessage()
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 0 reads value of a and b
+      actors(0) ! Atomic(
+        "test",
+        Array(Get("test", "a", probe.ref), Get("test", "b", probe.ref)),
+        probe.ref
+      )
+
+      // Kill one actor
+      actors(0) ! CRDTActorV4.Die
+
+      // Collect all responses of the atomic abort
+      val atomicAbortResponses = probe.receiveMessage()
+
+      // the size of the responses should be N_ACTORS - 1
+//      atomicAbortResponses.size shouldEqual (N_ACTORS - 1)
+
+      println(atomicAbortResponses)
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 1 reads values of a and b
+      actors(1) ! Get("test", "a", probe.ref)
+      val a1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(1) ! Get("test", "b", probe.ref)
+      val b1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: 100 b: 200; Received at actor 1: a1: $a1, b1: $b1"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a1.get == 150 && b1.get == 150) || (a1.get != 150 && b1.get != 150) shouldEqual true
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+      // Eventually, actor 2 reads new values of a and b
+      actors(2) ! Get("test", "a", probe.ref)
+      val a2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(2) ! Get("test", "b", probe.ref)
+      val b2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: 100 b: 200; Received at actor 2: a2: $a2, b2: $b2"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a2.get == 150 && b2.get == 150) || (a2.get != 150 && b2.get != 150) shouldEqual true
+    }
+
     "have sequentially consistent state after concurrent atomic actions" in new StoreSystem {
       // Setup key a to be 0
       actors(0) ! Put("test", "a", 0, probe.ref)
@@ -445,6 +505,55 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
           case msg => ()
         }
         Thread.sleep(25)
+      }
+    }
+
+    "have eventually consistent state after CRDT actions (basic) when nodes fail" in new StoreSystem {
+      // Create randomized key value tuples
+      val keyValues =
+        (0 until N_ACTORS).map(_ => (Utils.randomString(), Utils.randomInt()))
+
+      println(keyValues)
+
+      // Send random put messages to all actors
+      actors.foreach((i, actorRef) =>
+        actorRef ! Put("test", keyValues(i)._1, keyValues(i)._2, probe.ref)
+      )
+
+      // Kill one actor
+      actors(0) ! CRDTActorV4.Die
+
+      // Wait for actor to die
+      Thread.sleep(1000)
+
+      // We should receive one less response since one actor died
+      var responses = (1 until N_ACTORS).map(_ => probe.receiveMessage())
+
+      println(responses)
+
+      responses.foreach {
+        case putMsg: PutResponse =>
+          putMsg should not be null
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
+
+      // Wait for sync messages (assuming partially synchronous system)
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE + Utils.CRDT_SYNC_PERIOD)
+
+      // Send a get message for each key to each actor and verify the responses
+      keyValues.foreach { case (key, value) =>
+        actors.drop(1).foreach((_, actorRef) => actorRef ! Get("test", key, probe.ref))
+        responses = (1 until N_ACTORS).map(_ => probe.receiveMessage())
+
+        println(responses)
+
+        responses.foreach {
+          case getMsg: GetResponse =>
+            getMsg.value.get shouldEqual value
+          case msg =>
+            fail("Unexpected message: " + msg)
+        }
       }
     }
 
