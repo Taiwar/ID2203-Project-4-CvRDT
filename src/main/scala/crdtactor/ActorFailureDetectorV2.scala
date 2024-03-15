@@ -94,11 +94,11 @@ class ActorFailureDetectorV2(
   }
 
   def debugMsg(msg: String) = {
-//    ctx.log.info(s"FailureDetector-$id: $msg")
+    ctx.log.info(s"FailureDetector-$id: $msg")
   }
 
   // A map with all the other actors and a boolean if they are alive
-  private val aliveActors = scala.collection.mutable.Map[Int, Boolean]()
+  private var aliveActors = scala.collection.mutable.Map[Int, Boolean]()
 
   // TODO: Check if this is needed
   // A set of actors that are not synchronized
@@ -120,8 +120,6 @@ class ActorFailureDetectorV2(
     val variance = 10.millis + Random.nextInt((epsilon.toMillis.toInt - 10) + 1).millis
     val timoutTime = T + variance
 
-//    debs"ugMsg(tarting timeout timer for actor $actorId with timeout $timoutTime")
-
     timers.startTimerWithFixedDelay(
       actorId, // Use the provided id or default to the actor's id
       ActorFailureDetectorV2.Timeout(actorId),
@@ -132,13 +130,6 @@ class ActorFailureDetectorV2(
   // Stop the timer
   private def stopTimer(id: Int): Unit = {
     timers.cancel(id)
-  }
-
-  private def handleHeartbeatAck() : Unit = {
-    processTimeout = false
-    // TODO: Check if timers.cancel & restart is needed
-//    timers.cancel(TimerKey)
-    startTimeoutTimer(id) // Reset the timer
   }
 
   // This is the event handler of the actor, implement its logic here
@@ -163,7 +154,6 @@ class ActorFailureDetectorV2(
           case Some(actor: ActorRef[CRDTActorV4.Command]) =>
             debugMsg(s"Sending GetAliveActors to actor ${actor.path.name}")
             actor ! CRDTActorV4.GetAliveActors(ctx.self)
-//            ctx.scheduleOnce(1000.millis, actor, CRDTActorV4.GetAliveActors(ctx.self))
           case _ =>
             debugMsg(s"No actors found in 'others' map")
         }
@@ -184,8 +174,8 @@ class ActorFailureDetectorV2(
     // Only handle timeout if the actor is still alive
     case Timeout(actorId: Int) =>
       debugMsg(s"Timeout for actor $actorId")
-      // Set aliveActors to false
-      aliveActors += (actorId -> false)
+      // Remove the actor from the aliveActors map
+      aliveActors -= actorId
 
       var deadActor: Option[ActorRef[CRDTActorV4.Command]] = None
 
@@ -220,15 +210,15 @@ class ActorFailureDetectorV2(
 
     // Heartbeat handling
     case Heartbeat() =>
-      debugMsg(s"Sending heartbeat")
+//      debugMsg(s"Sending heartbeat")
 
-//      debugMsg(s"AliveActors: $aliveActors")
-
-      // TODO: Check if needed
       // Update the others map
       refreshOthers()
 
+//      debugMsg(s"Others when sending the heartbeat: $others")
+
       for ((actorId, actor) <- others) {
+        // if the actor does not exist in the aliveActors map, add it
         if (!aliveActors.contains(actorId)) {
           // Add actor to the aliveActors map
           aliveActors += (actorId -> true)
@@ -250,7 +240,7 @@ class ActorFailureDetectorV2(
 
     // Handle HeartbeatAck from CRDTActorV4
     case HeartbeatAck(from) =>
-      debugMsg(s"Received heartbeat ack from ${from.path.name}")
+//      debugMsg(s"Received heartbeat ack from ${from.path.name}")
 
       // Filter the actor from the others
       others.find(_._2 == from) match {
@@ -276,35 +266,43 @@ class ActorFailureDetectorV2(
       others.find(_._2 == from) match {
         case Some((actorId, actor)) =>
           // Handle MortalityNotice message from CRDTActorV4
-          aliveActors += (actorId -> false)
+          aliveActors -= actorId
 
           debugMsg(s"AliveActors: $aliveActors")
         case None =>
           debugMsg(s"Actor not found")
       }
-
-      // Send back the aliveActors to the actor
-//      from ! CRDTActorV4.AllParticipants(aliveActors, ctx.self)
       
       Behaviors.same
 
     // Update the aliveActors map with the latest aliveActors from the leader
-    case AliveActorsResponse(aliveActors) =>
+    case AliveActorsResponse(newAliveActors) =>
       debugMsg(s"Received AliveActorsResponse")
 
-      aliveActors match
+      newAliveActors match
         case map: Map[Int, Boolean] =>
 
-          // Update the aliveActors map
-          this.aliveActors ++= aliveActors
+          // Replace the aliveActors map with the new map
+          aliveActors = scala.collection.mutable.Map(map.toSeq: _*)
 
           // Remove our own id from the map
-          this.aliveActors -= id
+          if (aliveActors.contains(id)) {
+            aliveActors -= id
+          }
 
           debugMsg(s"Get new AliveActors from the leader: $aliveActors")
 
       // Wait a little bit before starting the failure detector timer
-      ctx.scheduleOnce(800.millis, ctx.self, StartFD)
+      ctx.scheduleOnce(300.millis, ctx.self, StartFD)
+
+      // Send leader message to retry the operation
+      others.get(0) match {
+        case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+          debugMsg(s"Sending RetryAtomic to actor ${actor.path.name}")
+          actor ! CRDTActorV4.retryAtomic
+        case _ =>
+          debugMsg(s"No actors found in 'others' map")
+      }
 
       Behaviors.same
 
@@ -320,13 +318,13 @@ class ActorFailureDetectorV2(
       // Add sender to the aliveActors map
       actors += (id -> true)
 
-      // Send the aliveActors to the failure detector from the actor
+       // Send the aliveActors to the failure detector from the actor
       from ! AliveActorsResponse(actors)
 
       Behaviors.same
 
     case StartFD =>
-      debugMsg(s"Starting failure detector timer!!!!")
+      debugMsg(s"Starting failure detector timer!")
       startFailureDetectorTimer()
       Behaviors.same
 
