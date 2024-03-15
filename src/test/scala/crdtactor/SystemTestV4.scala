@@ -1,6 +1,7 @@
 package crdtactor
 
 import org.apache.pekko.actor.testkit.typed.scaladsl.{ScalaTestWithActorTestKit, TestProbe}
+import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.scalatest.wordspec.AnyWordSpecLike
 
@@ -42,9 +43,9 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
     val supervisors = (0 until N_ACTORS).map { i =>
       // Spawn the actor and get its reference (address)
       val supervisorRef = spawn(Behaviors.setup[ActorSupervisorV1.Command] { ctx =>
-        Behaviors.withTimers(timers => new ActorSupervisorV1(i + 100, ctx, timers))
+        Behaviors.withTimers(timers => new ActorSupervisorV1(i, ctx, timers))
       })
-      i + 100 -> supervisorRef
+      i -> supervisorRef
     }.toMap
 
     Thread.sleep(100) // Wait for actors to be ready
@@ -214,6 +215,9 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
       // Kill one actor
       actors(3) ! CRDTActorV4.Die
 
+      // Wait for 5 seconds
+      Thread.sleep(5000)
+
       // Collect all responses of the atomic abort
       val atomicAbortResponses = (0 until N_ACTORS - 1).map(_ => probe.receiveMessage())
 
@@ -312,6 +316,101 @@ class SystemTestV4 extends ScalaTestWithActorTestKit with AnyWordSpecLike {
 
       // Either a1 and b1 are both 150 or both are not 150
       (a2.get == 150 && b2.get == 150) || (a2.get != 150 && b2.get != 150) shouldEqual true
+    }
+
+    "have sequentially consistent state after atomic actions with recovering nodes" in new StoreSystem {
+      // Simulate a bank transfer
+
+      // Set up
+      actors(0) ! Put("test", "a", 100, probe.ref)
+      actors(0) ! Put("test", "b", 200, probe.ref)
+      probe.receiveMessage()
+      probe.receiveMessage()
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Actor 0 reads value of a and b
+      actors(0) ! Atomic(
+        "test",
+        Array(Get("test", "a", probe.ref), Get("test", "b", probe.ref)),
+        probe.ref
+      )
+
+      // Wait for sync
+      Thread.sleep(1000)
+
+      // Kill one actor
+      actors(3) ! CRDTActorV4.Die
+
+      Thread.sleep(2000)
+
+      // Revive the actor
+      supervisors(3) ! ActorSupervisorV1.createActor()
+
+      val results =
+        probe.receiveMessage().asInstanceOf[AtomicResponse].responses
+      // Get tuple where first element is the key and second is the value
+      val a = results.find(_._1 == "a").get._2.asInstanceOf[GetResponse].value
+      val b = results.find(_._1 == "b").get._2.asInstanceOf[GetResponse].value
+
+      println(s"Read values: a: ${a.get}, b: ${b.get}")
+
+      // Actor 0 deducts 50 from b and adds 50 to a
+      actors(0) ! Atomic(
+        "test",
+        Array(
+          Put("test", "b", b.get - 50, probe.ref),
+          Put("test", "a", a.get + 50, probe.ref)
+        ),
+        probe.ref
+      )
+      probe.receiveMessage() match {
+        case AtomicResponse(_, _) =>
+        // Do nothing
+        case msg =>
+          fail("Unexpected message: " + msg)
+      }
+
+      // Actor 1 reads values of a and b
+      actors(1) ! Get("test", "a", probe.ref)
+      val a1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actors(1) ! Get("test", "b", probe.ref)
+      val b1 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from actor 0: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 1: a1: $a1, b1: $b1"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a1.get == 150 && b1.get == 150) || (a1.get != 150 && b1.get != 150) shouldEqual true
+
+      Thread.sleep(Utils.RANDOM_BC_DELAY_SAFE)
+
+      // Get global state
+      val globalState = Utils.GLOBAL_STATE.getAll[Int, ActorRef[CRDTActorV4.Command]]()
+
+      println(globalState)
+
+      var actor3: ActorRef[CRDTActorV4.Command] = null
+
+      globalState.get(3) match {
+        case Some(actor: ActorRef[CRDTActorV4.Command]) =>
+          actor3 = actor
+      }
+
+      // Eventually, actor 2 reads new values of a and b
+      actor3 ! Get("test", "a", probe.ref)
+      val a2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+      actor3 ! Get("test", "b", probe.ref)
+      val b2 = probe.receiveMessage().asInstanceOf[GetResponse].value
+
+      // Log the values
+      println(
+        s"Intended from ${actor3}: a: ${a.get + 50} b: ${b.get - 50}; Received at actor 3: a2: $a2, b2: $b2"
+      )
+
+      // Either a1 and b1 are both 150 or both are not 150
+      (a2.get == 150 && b2.get == 150) shouldEqual true
     }
 
     "have sequentially consistent state after concurrent atomic actions" in new StoreSystem {
