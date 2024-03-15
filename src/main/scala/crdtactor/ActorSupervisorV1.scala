@@ -32,15 +32,19 @@ class ActorSupervisorV1(
     ctx.log.info("Creating a new actor...")
     val actor = context.spawn(Behaviors.setup[CRDTActorV4.Command] { ctx =>
       Behaviors.withTimers(timers => new CRDTActorV4(id, ctx, timers))
-    }, "CHILDACTOR")
+    }, s"actor-$id")
     startActor(actor)
     context.watch(actor)
     actor
   }
 
   private def startActor(actor: ActorRef[CRDTActorV4.Command]): Unit = {
+    ctx.log.info("old global state without new actor: " + Utils.GLOBAL_STATE.getAll[Int, ActorRef[CRDTActorV4.Command]]().toString)
+
     // Write actor addresses into the global state with id and actorRef
     Utils.GLOBAL_STATE.put(id, actor)
+
+    ctx.log.info("new global state with new actor: " + Utils.GLOBAL_STATE.getAll[Int, ActorRef[CRDTActorV4.Command]]().toString)
 
     // Set leader (BLE mock)
     // Get first actor reference
