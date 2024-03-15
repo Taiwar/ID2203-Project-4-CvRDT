@@ -1,5 +1,6 @@
 package crdtactor
 
+import org.apache.pekko.actor.Cancellable
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.cluster.ddata
@@ -74,6 +75,8 @@ object CRDTActorV4 {
 
   case class AbortAtomicOperations() extends Command
 
+  case object retryAtomic extends Command
+
   // Error responses
 
   case class UnknownCommandResponse() extends Indication
@@ -130,7 +133,7 @@ object CRDTActorV4 {
 
   case class HeartbeatAck(from: ActorRef[Command]) extends Command
 
-  case class RequestToJoin(from: ActorRef[Command]) extends Command
+//  case class RequestToJoin(from: ActorRef[Command]) extends Command
 
   case class GetAliveActors(from: ActorRef[ActorFailureDetectorV2.Command]) extends Command
 }
@@ -155,11 +158,22 @@ class CRDTActorV4(
 
   // Hack to get the actor references of the other actors, check out `lazy val`
   // Careful: make sure you know what you are doing if you are editing this code
-  private lazy val everyone =
-    Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
+//  private lazy val everyone =
+  ////    Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
+
+  var everyone: Map[Int, ActorRef[Command]] = Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
   // Make copy of everyone and remove self
-  private lazy val others = everyone - id
+//  private lazy val others = everyone - id
+
+  // Define the variable
+  var others: Map[Int, ActorRef[Command]] = everyone - id
+
+  // Define a method to update the variable
+  def refreshState(): Unit = {
+    everyone = Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
+    others = everyone - id
+  }
 
   // The leader of the system
 
@@ -174,7 +188,9 @@ class CRDTActorV4(
   private val locks = mutable.Map[String, Int]()
   private val commandBuffer = mutable.Queue[Command]()
   private val atomicCommandBuffer = mutable.Queue[Command]()
+  private val atomicTransactionBuffer = mutable.Queue[Command]()
   private var dirty = false
+  private var abortOperationsTimer: Cancellable = _
 
   // Random number generator
   val r = scala.util.Random
@@ -486,6 +502,9 @@ class CRDTActorV4(
         return Behaviors.same
       }
 
+      // Add to atomic transaction buffer
+      atomicTransactionBuffer.enqueue(DelayedMessage(ForwardAtomic(opId, from, commands, ctx.self)))
+
       // Get all used keys from commands
       val keys = commands.flatMap {
         case Put(opId, key, _, _) => Some(key)
@@ -608,12 +627,13 @@ class CRDTActorV4(
         }
       } // If im the leader, we need to set a timer to abort ongoing transactions
       else if (leader.isDefined && leader.get == ctx.self) {
-        debugMsg(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions")
+        if (abortOperationsTimer == null) {
+          debugMsg(s"CRDTActor-$id: Actor is dead, aborting ongoing transactions after 5 seconds")
 
-        // Set a timer to abort ongoing transactions
-        ctx.scheduleOnce(500.millis, ctx.self, AbortOperationsTimer(actor))
+          // Set a timer to abort ongoing transactions
+          abortOperationsTimer = ctx.scheduleOnce(5000.millis, ctx.self, AbortOperationsTimer(actor))
+        }
       }
-
       Behaviors.same
 
     case AbortAtomicOperations() =>
@@ -645,21 +665,55 @@ class CRDTActorV4(
 
       Behaviors.same
 
-    case RequestToJoin(from) =>
-      debugFD(s"CRDTActor-$id: Received request to join from ${from.path.name}")
-      // Update the failure detector with the new state
-      failureDetector ! ActorFailureDetectorV2.JoinRequest(from)
-      Behaviors.stopped
+//    case RequestToJoin(from) =>
+//      debugFD(s"CRDTActor-$id: Received request to join from ${from.path.name}")
+//      // Update the failure detector with the new state
+//      failureDetector ! ActorFailureDetectorV2.JoinRequest(from)
+//
+//      // refresh state
+//      refreshState()
+//
+//      Behaviors.stopped
 
     case GetAliveActors(from) =>
       debugFD(s"CRDTActor-$id: Received request to get alive actors from ${from.path.name}")
+
+      // refresh state
+      refreshState()
+
       // Update the failure detector with the new state
       failureDetector ! ActorFailureDetectorV2.GetAliveActors(from)
       Behaviors.same
 
     case Die =>
       context.log.info("Received PoisonPill, stopping...")
+      //      // Remove actor from global state
+      //      Utils.GLOBAL_STATE.remove(id)
       Behaviors.stopped
+
+    // Retry atomic operation when actor is revived
+    case retryAtomic =>
+      debugMsg(s"CRDTActor-$id: RETRYING ATOMIC OPERATION!!!")
+
+      // Clear pending transactions
+      pendingTransactionAgreement.clear()
+      pendingTransactions.clear()
+      pendingTransactionRefs.clear()
+      // Unlock all locks
+      locks.clear()
+
+      if (abortOperationsTimer != null) {
+        abortOperationsTimer.cancel()
+      }
+
+      debugMsg(s"CRDTActor-$id: abortOperationsTimer: $abortOperationsTimer")
+
+      debugMsg(s"CRDTActor-$id: buffer: $atomicTransactionBuffer")
+      if (atomicTransactionBuffer.nonEmpty) {
+        val tx = atomicTransactionBuffer.dequeue()
+        ctx.self ! tx
+      }
+      Behaviors.same
 
   Behaviors.same
 }
